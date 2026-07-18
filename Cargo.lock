@@ -878,6 +878,7 @@ dependencies = [
 name = "kawari-navimesh"
 version = "7.51.2"
 dependencies = [
+ "glam",
  "icarus",
  "kawari",
  "kawari-world",
