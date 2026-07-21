@@ -9,6 +9,18 @@ use kawari::{
     },
 };
 
+/// `SetPartyMemberCutsceneFlags.unk2` sent when a cutscene starts (retail capture, line 607).
+///
+/// The client handler only looks at bit `0x02` (`member.flags &= ~0x10; if (unk2 & 2) member.flags
+/// |= 0x10;`), which is what lights up the cutscene marker in the party list. Bit `0x01` is set in
+/// both the start and the end packet and its meaning is unknown, so both values are reproduced
+/// verbatim from the capture rather than reduced to just the bit we understand.
+const PARTY_CUTSCENE_FLAGS_WATCHING: u32 = 3;
+
+/// `SetPartyMemberCutsceneFlags.unk2` sent when the cutscene ends (retail capture, line 623).
+/// See [`PARTY_CUTSCENE_FLAGS_WATCHING`] for why this isn't simply `0`.
+const PARTY_CUTSCENE_FLAGS_IDLE: u32 = 1;
+
 pub fn fetch_entries<T>(
     next_index: &mut u16,
     data: &mut Vec<T>,
@@ -35,6 +47,29 @@ where
     }
 
     ret
+}
+
+/// Picks the status to show out of `mask`: the one whose OnlineStatus sheet `Priority` is the
+/// lowest number, e.g. "AFK" is shown above "Online". `priorities` is indexed by row id, which is
+/// the `OnlineStatus` discriminant.
+///
+/// Kept a pure function of its two inputs so the ranking the layered statuses depend on (the
+/// cutscene bit having to beat Online/NewAdventurer/PartyMember) is unit-testable without a
+/// `ZoneConnection` or game data.
+fn highest_priority_status(mask: OnlineStatusMask, priorities: &[u8]) -> OnlineStatus {
+    let mut priorities: Vec<(usize, &u8)> = priorities.iter().enumerate().collect();
+    // So the highest priority (e.g. "AFK" is above "Online") are the first indices
+    priorities
+        .sort_by(|(_, a_priority), (_, b_priority)| a_priority.partial_cmp(b_priority).unwrap());
+
+    for (i, _) in priorities {
+        let online_status = OnlineStatus::from_repr(i as u8).unwrap();
+        if mask.has_status(online_status) {
+            return online_status;
+        }
+    }
+
+    OnlineStatus::Offline
 }
 
 impl ZoneConnection {
@@ -368,6 +403,15 @@ impl ZoneConnection {
             }
         }
 
+        // Same deal for the cutscene bit, which likewise lives only in this connection's memory.
+        // Layering it here feeds BOTH channels from one place, exactly like retail: the 64-bit
+        // social mask sent to ourselves, and — via `get_actual_online_status`, where
+        // `ViewingCutscene`'s sheet Priority 10 outranks Online/NewAdventurer/PartyMember/AFK —
+        // the `SetStatusIcon` nametag icon broadcast to everyone in range.
+        if mask.has_status(OnlineStatus::Online) && self.watching_cutscene {
+            mask.set_status(OnlineStatus::ViewingCutscene);
+        }
+
         mask
     }
 
@@ -379,19 +423,8 @@ impl ZoneConnection {
             let mut gamedata = self.gamedata.lock();
             priorities = gamedata.online_status_priorities();
         }
-        let mut priorities: Vec<(usize, &u8)> = priorities.iter().enumerate().collect();
-        priorities.sort_by(|(_, a_priority), (_, b_priority)| {
-            a_priority.partial_cmp(b_priority).unwrap()
-        }); // So the highest priority (e.g. "AFK" is above "Online") are the first indices
 
-        for (i, _) in priorities {
-            let online_status = OnlineStatus::from_repr(i as u8).unwrap();
-            if mask.has_status(online_status) {
-                return online_status;
-            }
-        }
-
-        OnlineStatus::Offline
+        highest_priority_status(mask, &priorities)
     }
 
     /// The online status to stamp on this player's **nametag** (world-actor) channel.
@@ -417,6 +450,64 @@ impl ZoneConnection {
             .send(ToServer::SetOnlineStatus(
                 self.player_data.character.actor_id,
                 self.nametag_online_status(),
+            ))
+            .await;
+    }
+
+    /// Marks the player as watching a cutscene, if they weren't already.
+    ///
+    /// Retail sends the party-UI marker first and the status right after (capture lines 607-610),
+    /// both before the scene itself, so the icon is already up when the cutscene starts playing.
+    pub async fn begin_watching_cutscene(&mut self) {
+        if self.watching_cutscene {
+            return;
+        }
+
+        // Do nothing at all if the cutscene bit wouldn't actually land, keeping the two channels
+        // in agreement. `get_online_status_mask` only layers the bit on while we're online, so a
+        // scene that starts after `begin_log_out` has committed `is_online = false` would leave us
+        // broadcasting the party marker and setting the flag while the status silently stayed put
+        // — and that marker would then only be taken down if the client happened to send a second
+        // LogOut. The flag is still false here, so this call returns exactly the mask we would be
+        // layering onto.
+        if !self
+            .get_online_status_mask()
+            .has_status(OnlineStatus::Online)
+        {
+            return;
+        }
+
+        self.watching_cutscene = true;
+
+        self.send_party_cutscene_marker(PARTY_CUTSCENE_FLAGS_WATCHING)
+            .await;
+        self.update_online_status().await;
+    }
+
+    /// Clears the cutscene status, if it was set.
+    ///
+    /// `event_finish` is the normal clear point, but a cutscene can also be abandoned without one
+    /// (zone change or duty leave mid-scene, logout, a script that never calls `finish_event`), so
+    /// this is also called from those teardown paths to make sure the icon can never get stuck.
+    /// Idempotent, so calling it from several of them is harmless.
+    pub async fn end_watching_cutscene(&mut self) {
+        if !self.watching_cutscene {
+            return;
+        }
+        self.watching_cutscene = false;
+
+        self.send_party_cutscene_marker(PARTY_CUTSCENE_FLAGS_IDLE)
+            .await;
+        self.update_online_status().await;
+    }
+
+    /// Broadcasts this player's party-UI cutscene marker to their party (or to just themselves if
+    /// they aren't in one), which is what retail does at both ends of a cutscene.
+    async fn send_party_cutscene_marker(&mut self, unk2: u32) {
+        self.handle
+            .send(ToServer::SetPartyMemberCutsceneFlags(
+                self.player_data.character.actor_id,
+                unk2,
             ))
             .await;
     }
@@ -588,5 +679,97 @@ impl ZoneConnection {
             num_results: self.search_results.len() as u32,
         });
         self.send_ipc_self(ipc).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The OnlineStatus sheet's `Priority` column, indexed by row id (which is the `OnlineStatus`
+    /// discriminant), copied verbatim from game data. Lower is more important; the rows the client
+    /// never ranks (GM flavours, `SharingDuty`, `FreeCompany`, ...) all sit at 0.
+    fn sheet_priorities() -> Vec<u8> {
+        vec![
+            0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            21, 22, 31, 32, 33, 34, 35, 36, 23, 24, 25, 26, 27, 28, 29, 30, 0, 0, 11, 38, 0, 0, 37,
+        ]
+    }
+
+    fn mask_of(statuses: &[OnlineStatus]) -> OnlineStatusMask {
+        let mut mask = OnlineStatusMask::default();
+        for status in statuses {
+            mask.set_status(*status);
+        }
+        mask
+    }
+
+    /// The invariant the whole cutscene status rests on: `get_online_status_mask` only ever
+    /// *layers* `ViewingCutscene` on top of the bits that are already there, so the nametag icon
+    /// only actually changes if that bit outranks all of them. Sheet priorities: ViewingCutscene
+    /// 10, PartyLeader 26, PartyMember 27, NewAdventurer 36, Online 37.
+    #[test]
+    fn viewing_cutscene_outranks_the_statuses_it_is_layered_onto() {
+        use OnlineStatus::*;
+
+        let priorities = sheet_priorities();
+        assert_eq!(
+            highest_priority_status(
+                mask_of(&[Online, NewAdventurer, PartyMember, ViewingCutscene]),
+                &priorities
+            ),
+            ViewingCutscene
+        );
+        assert_eq!(
+            highest_priority_status(
+                mask_of(&[Online, PartyLeader, PartyMember, ViewingCutscene]),
+                &priorities
+            ),
+            ViewingCutscene
+        );
+    }
+
+    /// Guards the extraction of `highest_priority_status` out of `get_actual_online_status`: with
+    /// no cutscene bit in play the ranking must be exactly what it was before this feature.
+    #[test]
+    fn ranking_without_the_cutscene_bit_is_unchanged() {
+        use OnlineStatus::*;
+
+        let priorities = sheet_priorities();
+        assert_eq!(highest_priority_status(mask_of(&[]), &priorities), Offline);
+        assert_eq!(
+            highest_priority_status(mask_of(&[Online]), &priorities),
+            Online
+        );
+        assert_eq!(
+            highest_priority_status(mask_of(&[Online, NewAdventurer]), &priorities),
+            NewAdventurer
+        );
+        assert_eq!(
+            highest_priority_status(mask_of(&[Online, NewAdventurer, PartyMember]), &priorities),
+            PartyMember
+        );
+        assert_eq!(
+            highest_priority_status(
+                mask_of(&[Online, PartyLeader, PartyMember, AwayFromKeyboard]),
+                &priorities
+            ),
+            AwayFromKeyboard
+        );
+    }
+
+    /// Not an oversight: `Busy` (7) beats `ViewingCutscene` (10) in the sheet, so a player who set
+    /// themselves to busy keeps that icon through a cutscene. Retail behaves the same way.
+    #[test]
+    fn busy_outranks_viewing_cutscene() {
+        use OnlineStatus::*;
+
+        assert_eq!(
+            highest_priority_status(
+                mask_of(&[Online, Busy, ViewingCutscene]),
+                &sheet_priorities()
+            ),
+            Busy
+        );
     }
 }

@@ -261,4 +261,35 @@ mod tests {
         assert_eq!(OnlineStatus::Busy.for_nametag(), OnlineStatus::Busy);
         assert_eq!(OnlineStatus::Offline.for_nametag(), OnlineStatus::Offline);
     }
+
+    #[test]
+    fn viewing_cutscene_is_a_nametag_status() {
+        // Retail drives the cutscene status on BOTH channels at once: the nametag icon
+        // (`SetStatusIcon = 15`) and the 64-bit social mask. `for_nametag` must therefore let it
+        // through untouched, unlike the list-only `Online`.
+        assert_eq!(
+            OnlineStatus::ViewingCutscene.for_nametag(),
+            OnlineStatus::ViewingCutscene
+        );
+
+        // Bit layout check against a retail capture: the `SetOnlineStatus` sent alongside the
+        // cutscene carried `00 80 00 00 00 89 00 00`, i.e. bit 15 (ViewingCutscene) on top of the
+        // player's usual bits (40 AnotherWorld, 43 InDuty, 47 Online in byte 5).
+        let mask: [u8; 8] = [0, 128, 0, 0, 0, 137, 0, 0];
+        assert_eq!(
+            OnlineStatusMask::from(mask).mask(),
+            vec![
+                OnlineStatus::ViewingCutscene,
+                OnlineStatus::AnotherWorld,
+                OnlineStatus::InDuty,
+                OnlineStatus::Online
+            ]
+        );
+
+        // And the same bit is what `set_status` produces, which is how the server builds it.
+        let mut built = OnlineStatusMask::default();
+        built.set_status(OnlineStatus::ViewingCutscene);
+        assert!(built.has_status(OnlineStatus::ViewingCutscene));
+        assert_eq!(built.mask(), vec![OnlineStatus::ViewingCutscene]);
+    }
 }

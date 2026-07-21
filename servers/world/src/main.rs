@@ -174,6 +174,7 @@ async fn initial_setup(
                     teleport_reason: TeleportReason::NotSpecified,
                     active_minion: 0,
                     party_id: 0,
+                    watching_cutscene: false,
                     rejoining_party: false,
                     login_time: None,
                     zone_initialize_sent: false,

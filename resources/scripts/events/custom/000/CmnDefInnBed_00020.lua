@@ -40,9 +40,6 @@ function onReturn(scene, results, player)
         if decision == NOTHING or decision == CANCEL_SCENE then
             player:finish_event()
         else
-            if decision == LOG_OUT or decision == EXIT_GAME then
-                player:begin_log_out()
-            end
             player:play_scene(SCENE_SLEEP_ANIM, CUTSCENE_FLAGS, {decision})
         end
     elseif scene == SCENE_SLEEP_ANIM then
@@ -50,6 +47,16 @@ function onReturn(scene, results, player)
             player:play_scene(SCENE_DREAMFITTING, CUTSCENE_FLAGS, {0})
         else
             -- The player decided to log out or exit the game. The server don't care which, as the client handles itself, so pass along the decision.
+            --
+            -- Retail begins the log out *here*, between the sleep animation and the log out
+            -- scene, not before the sleep animation: it sends LogOutComplete only after the
+            -- sleep scene's EventFinish and immediately before the log out scene. So the player
+            -- stays online for the whole sleep animation and keeps the ViewingCutscene status
+            -- while it plays. Beginning it any earlier commits the player as offline, which
+            -- makes the status silently unavailable for the rest of the event.
+            if decision == LOG_OUT or decision == EXIT_GAME then
+                player:begin_log_out()
+            end
             player:play_scene(SCENE_LOG_OUT, CUTSCENE_FLAGS, {decision})
         end
     elseif scene == SCENE_DREAMFITTING then

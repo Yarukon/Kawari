@@ -38,6 +38,21 @@ impl ZoneConnection {
             ..Default::default()
         };
         if let Some(ipc) = scene.package() {
+            // A scene carrying CONDITION_CUTSCENE is what retail treats as "the player is watching
+            // a cutscene": it sets the status (and the party-UI marker) right before sending the
+            // scene and clears both at EventFinish. The flag is the right predicate to key off —
+            // of the 200 `play_scene` call sites in `resources/scripts` only 18 carry it, and
+            // SET_BASE (what quest cutscenes use) includes it, so quest cutscenes are covered
+            // without listing them. The other 182 are menu and dialog scenes, passing some
+            // combination of HIDE_HOTBAR/NO_DEFAULT_CAMERA, or no flags at all.
+            //
+            // Set only once the scene is known to be sendable: if `package()` bailed there would
+            // be no scene, hence no EventFinish to clear the status again, and the icon would
+            // stick until the next zone change or logout.
+            if scene_flags.contains(SceneFlags::CONDITION_CUTSCENE) {
+                self.begin_watching_cutscene().await;
+            }
+
             self.send_ipc_self(ipc).await;
         } else {
             tracing::error!(
@@ -72,6 +87,14 @@ impl ZoneConnection {
                 self.send_ipc_self(ipc).await;
             }
         }
+
+        // Drop the cutscene status if this event was playing one. Unconditional (rather than tied
+        // to the popped event) because this is the sole funnel for ending an event, and the flag
+        // is a plain bool. Note this runs more often than it looks: a single Lua `finish_event()`
+        // reaches here twice (`process_lua_player` calls it for the task, then once more at the
+        // end "to handle PreHandler's & others nesting"), popping up to two frames and clearing
+        // twice. Harmless, since clearing when the flag isn't set costs nothing.
+        self.end_watching_cutscene().await;
 
         if let Some(event) = events.last() {
             self.event_handler_id = Some(HandlerId(event.1.id));

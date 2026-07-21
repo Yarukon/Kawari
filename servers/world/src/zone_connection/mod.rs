@@ -157,6 +157,15 @@ pub struct ZoneConnection {
     /// The player's party id number, used for networking party-related events
     pub party_id: u64,
     pub is_party_leader: bool,
+    /// Whether the player is currently watching a cutscene, driving the `ViewingCutscene` online
+    /// status (nametag icon + social mask bit) and the party-UI cutscene marker.
+    ///
+    /// Deliberately connection-local and in-memory only: it is transient state that is meaningless
+    /// once the connection is gone. Persisting it would strand a stuck cutscene icon on the
+    /// character after a crash or a hard disconnect, which is exactly the failure this flag is
+    /// supposed to avoid. Never write it to the database or into
+    /// `Database::determine_base_online_status_mask`.
+    pub watching_cutscene: bool,
     /// The player's status when connecting/reconnecting. If true, they need to rejoin their party.
     pub rejoining_party: bool,
     /// The player's currently active quests.
@@ -334,6 +343,20 @@ impl ZoneConnection {
     }
 
     pub async fn begin_log_out(&mut self) {
+        // Drop the cutscene status before anything else, so observers stop seeing the icon on a
+        // player who dropped out mid-cutscene. The barrier this has to stay in front of is
+        // `commit_player_data` below, not the `is_online` assignment right after: the mask is
+        // computed from the DB (`determine_base_online_status_mask`), so once the commit has
+        // written `is_online = false` the mask no longer carries `Online` and the cutscene bit,
+        // which is only ever layered on top of it, can no longer be cleared from it. This is the
+        // funnel for both a graceful logout and a forced one after a network drop.
+        //
+        // The inn bed IS one of these: retail keeps the player online for the whole sleep
+        // animation -- it carries the `ViewingCutscene` status like any other cutscene -- and only
+        // sends LogOutComplete afterwards, between that scene and the log out scene. Our script
+        // matches that ordering, so this call is what takes the icon back down there.
+        self.end_watching_cutscene().await;
+
         // Mark the player as offline in the db.
         self.player_data.volatile.is_online = false;
 

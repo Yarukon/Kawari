@@ -3852,6 +3852,21 @@ pub async fn server_main_loop(
                         },
                     );
                 }
+                ToServer::SetPartyMemberCutsceneFlags(from_actor_id, unk2) => {
+                    let mut network = network.lock();
+                    // Retail sends this as an ActorControlSelf to every party member (the actor it
+                    // applies to is a payload field, not the packet's source), so the marker shows
+                    // up next to the right row in everyone's party list.
+                    network.send_to_party_or_self(
+                        from_actor_id,
+                        FromServer::ActorControlSelf(
+                            ActorControlCategory::SetPartyMemberCutsceneFlags {
+                                actor_id: from_actor_id,
+                                unk2,
+                            },
+                        ),
+                    );
+                }
                 ToServer::SetCharacterMode(from_actor_id, mode, arg) => {
                     // ACS is sent by the ZoneConnection
                     let mut data = data.lock();

@@ -559,6 +559,9 @@ pub enum ToServer {
     Dismounted(ObjectId, Option<u64>),
     /// Inform the server of this actor's new online status.
     SetOnlineStatus(ObjectId, OnlineStatus),
+    /// Broadcast this actor's party-UI cutscene marker (`unk2`) to their party, as retail does at
+    /// both ends of a cutscene.
+    SetPartyMemberCutsceneFlags(ObjectId, u32),
     /// The client is requesting to ride pillion with a party member's mount.
     RidePillionRequest(ObjectId, Option<u64>, ObjectId, u32),
     /// Inform the server of this actor's new CharacterMode.
@@ -701,6 +704,7 @@ impl ToServer {
             Self::ReloadScripts => "ReloadScripts",
             Self::Dismounted(..) => "Dismounted",
             Self::SetOnlineStatus(..) => "SetOnlineStatus",
+            Self::SetPartyMemberCutsceneFlags(..) => "SetPartyMemberCutsceneFlags",
             Self::RidePillionRequest(..) => "RidePillionRequest",
             Self::SetCharacterMode(..) => "SetCharacterMode",
             Self::BroadcastActorControl(..) => "BroadcastActorControl",
