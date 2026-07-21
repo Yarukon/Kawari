@@ -6,9 +6,9 @@ use axum::Router;
 use axum::routing::get;
 use kawari::common::{
     ContainerType, DEBUG_COMMAND_TRIGGER, DirectorEvent, DirectorTrigger,
-    DutyOption, FestivalId, HandlerId, HandlerType, ItemOperationKind, LogMessageType, ObjectId,
-    ObjectTypeId, ObjectTypeKind, PlayerStateFlags1, PlayerStateFlags2, PlayerStateFlags3,
-    Position, calculate_max_level,
+    DutyOption, FestivalId, HandlerId, HandlerType, InstanceContentType, ItemOperationKind,
+    LogMessageType, ObjectId, ObjectTypeId, ObjectTypeKind, PlayerStateFlags1, PlayerStateFlags2,
+    PlayerStateFlags3, Position, calculate_max_level,
 };
 use kawari::config::{FilesystemConfig, get_config};
 use kawari_world::inventory::{Item, MAX_LARGE_STORAGE};
@@ -1402,7 +1402,7 @@ async fn process_packet(
                             } => {
                                 // TODO: move to server state? why is this here?
                                 match trigger {
-                                    DirectorTrigger::Sync { .. } => {
+                                    DirectorTrigger::BaseDirectorCommand0 { .. } => {
                                         // Always send a sync response for now
                                         connection
                                             .actor_control_self(
@@ -1418,13 +1418,13 @@ async fn process_packet(
                                             )
                                             .await;
                                     }
-                                    DirectorTrigger::SummonStrikingDummy { .. } => {
+                                    DirectorTrigger::ToggleStrikingDummy { .. } => {
                                         tracing::info!("Spawning a striking dummy is unsupported!");
                                     }
-                                    DirectorTrigger::GoldSaucerUnk1 { .. } => {
+                                    DirectorTrigger::SubclassCommand0 { .. } => {
                                         // dummied out
                                     }
-                                    DirectorTrigger::GoldSaucerUnk2 { .. } => {
+                                    DirectorTrigger::SubclassCommand1 { .. } => {
                                         // hardcoded for now
 
                                         connection
@@ -1480,23 +1480,44 @@ async fn process_packet(
                                             ))
                                             .await;
                                     }
-                                    DirectorTrigger::VariantVote { route } => {
-                                        connection
-                                            .handle
-                                            .send(ToServer::VariantVote(
-                                                connection.player_data.character.actor_id,
-                                                route,
-                                            ))
-                                            .await;
-
-                                        connection
-                                            .actor_control_self(
-                                                ActorControlCategory::DirectorEvent {
-                                                    handler_id,
-                                                    event: DirectorEvent::HideVariantVoteRoute,
-                                                },
+                                    DirectorTrigger::SubclassCommand2 { arg1, .. } => {
+                                        // This magic is namespaced by the director class: it is a
+                                        // Variant Dungeon route vote, but Deep Dungeons send it
+                                        // for "use stone". Only take the vote path when the
+                                        // director really is a Variant Dungeon, otherwise we'd
+                                        // answer a Deep Dungeon with a vote window update.
+                                        let variant_dungeon = {
+                                            let mut game_data = connection.gamedata.lock();
+                                            matches!(
+                                                game_data.find_type_for_content(
+                                                    handler_id.event_id() as u16
+                                                ),
+                                                Some(InstanceContentType::VariantDungeon)
                                             )
-                                            .await;
+                                        };
+
+                                        if variant_dungeon {
+                                            connection
+                                                .handle
+                                                .send(ToServer::VariantVote(
+                                                    connection.player_data.character.actor_id,
+                                                    arg1,
+                                                ))
+                                                .await;
+
+                                            connection
+                                                .actor_control_self(
+                                                    ActorControlCategory::DirectorEvent {
+                                                        handler_id,
+                                                        event: DirectorEvent::HideVariantVoteRoute,
+                                                    },
+                                                )
+                                                .await;
+                                        } else {
+                                            tracing::info!(
+                                                "DirectorTrigger: {handler_id} {trigger:?}"
+                                            );
+                                        }
                                     }
                                     _ => tracing::info!(
                                         "DirectorTrigger: {handler_id} {trigger:?}"
