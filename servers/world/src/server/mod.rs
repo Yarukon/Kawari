@@ -3842,7 +3842,25 @@ pub async fn server_main_loop(
                     }
                 }
                 ToServer::SetOnlineStatus(from_actor_id, online_status) => {
-                    let data = data.lock();
+                    let mut data = data.lock();
+
+                    // Keep the stored spawn in step with the broadcast below. The broadcast only
+                    // reaches players who are already in range, so without this an observer who
+                    // arrives later -- zoning back in, or simply walking up -- is sent whatever
+                    // status the actor happened to carry when it spawned. That is how a party icon
+                    // survives on someone whose party disbanded while the observer was in another
+                    // zone, and it strands every other transient status the same way.
+                    //
+                    // `ZoneConnection::respawn_player` fills this field from
+                    // `nametag_online_status()`, which is exactly what is being broadcast here, so
+                    // the stored value and the wire value stay the same shape.
+                    if let Some(instance) = data.find_actor_instance_mut(from_actor_id)
+                        && let Some(actor) = instance.find_actor_mut(from_actor_id)
+                        && let Some(spawn) = actor.get_player_spawn_mut()
+                    {
+                        spawn.online_status = online_status;
+                    }
+
                     let mut network = network.lock();
                     network.send_ac_in_range_inclusive(
                         &data,

@@ -148,6 +148,13 @@ impl NetworkedActor {
         }
     }
 
+    pub fn get_player_spawn_mut(&mut self) -> Option<&mut SpawnPlayer> {
+        match self {
+            NetworkedActor::Player { spawn, .. } => Some(spawn),
+            _ => None,
+        }
+    }
+
     pub fn get_npc_spawn(&self) -> Option<&SpawnNpc> {
         match &self {
             NetworkedActor::Npc { spawn, .. } => Some(spawn),
