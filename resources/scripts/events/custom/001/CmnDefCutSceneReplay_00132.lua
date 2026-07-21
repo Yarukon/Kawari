@@ -18,7 +18,6 @@ function onReturn(scene, results, player)
     local decision <const> = results[1]
 
     if scene == SCENE_SHOW_MENU and decision ~= NO_SCENE then
-        -- TODO: we need to switch the player into viewingcutscene online status (on the Rust side?)
         player:play_scene(SCENE_PLAY_CUTSCENE, UEJ_REPLAY_FLAGS, results)
     elseif scene == SCENE_PLAY_CUTSCENE then
         player:play_scene(SCENE_SHOW_MENU, HIDE_HOTBAR, {1})

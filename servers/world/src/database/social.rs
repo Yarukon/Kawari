@@ -157,6 +157,15 @@ impl WorldDatabase {
     /// only have the DB (querying *other* players) should use [`determine_online_status_mask`].
     ///
     /// Returns an empty mask if the player is not online.
+    ///
+    /// CHANNEL SPLIT / HAZARD: this mask feeds BOTH the nametag channel (via
+    /// `get_actual_online_status`, which picks the single highest-priority bit) and the
+    /// friend/social list. The viewer-relative duty bits `InDuty`(prio 11)/`AnotherWorld`(prio 30)
+    /// outrank `Online`(prio 37), so they must NEVER be added here or in
+    /// `determine_online_status_mask` -- doing so would stamp a duty icon on the nameplate. Those
+    /// bits are set exclusively on friend `PlayerEntry` masks in
+    /// `ZoneConnection::apply_friend_duty_relations` (Channel B), which never flows back into this
+    /// path.
     pub fn determine_base_online_status_mask(&mut self, for_content_id: i64) -> OnlineStatusMask {
         let mut new_status_mask = OnlineStatusMask::default();
 

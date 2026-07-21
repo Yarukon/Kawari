@@ -157,6 +157,15 @@ pub struct ZoneConnection {
     /// The player's party id number, used for networking party-related events
     pub party_id: u64,
     pub is_party_leader: bool,
+    /// Whether the player is currently watching a cutscene, driving the `ViewingCutscene` online
+    /// status (nametag icon + social mask bit) and the party-UI cutscene marker.
+    ///
+    /// Deliberately connection-local and in-memory only: it is transient state that is meaningless
+    /// once the connection is gone. Persisting it would strand a stuck cutscene icon on the
+    /// character after a crash or a hard disconnect, which is exactly the failure this flag is
+    /// supposed to avoid. Never write it to the database or into
+    /// `Database::determine_base_online_status_mask`.
+    pub watching_cutscene: bool,
     /// The player's status when connecting/reconnecting. If true, they need to rejoin their party.
     pub rejoining_party: bool,
     /// The player's currently active quests.
@@ -222,6 +231,32 @@ pub struct ZoneConnection {
     pub director_vars: Option<ServerZoneIpcSegment>,
     /// Current dye action information.
     pub dyeing_information: Option<DyeInformation>,
+    /// True while a friend-list duty-enrichment round-trip is in flight (Channel B). Guards against
+    /// firing a second request (or draining an un-enriched page) if the client reopens/re-requests
+    /// the first page before the response arrives.
+    pub friend_enrich_pending: bool,
+    /// The sequence of the most recent first-page friend-list request; the enrichment response is
+    /// answered with this (it may have advanced past the in-flight request's sequence if the list
+    /// was reopened while the round-trip was pending).
+    pub friend_enrich_sequence: u8,
+    /// The (content_id, actor_id) pairs of currently-online friends, resolved in
+    /// `refresh_friend_list` and sent to the server loop for duty enrichment.
+    pub friend_enrich_pairs: Vec<(u64, ObjectId)>,
+    /// True while a party-list duty-enrichment round-trip is in flight (Channel B). Independent of
+    /// `friend_enrich_pending` so a Party and a Friends round-trip can be in flight concurrently
+    /// (tab-switch under latency) without cross-contaminating each other's list.
+    pub party_enrich_pending: bool,
+    /// The sequence of the most recent first-page party-list request; the enrichment response is
+    /// answered with this (it may have advanced past the in-flight request's sequence if the list
+    /// was reopened while the round-trip was pending).
+    pub party_enrich_sequence: u8,
+    /// The (content_id, actor_id) pairs of currently-online, non-self party members, resolved in
+    /// `refresh_party_list` and sent to the server loop for duty enrichment.
+    pub party_enrich_pairs: Vec<(u64, ObjectId)>,
+    /// The base party-member entries stashed by `refresh_party_list` to survive the enrichment
+    /// round-trip await; `apply_party_duty_relations` decorates them and the deferred send drains
+    /// them (the party list is single-page, so this is taken wholesale, not paginated).
+    pub party_enrich_entries: Vec<PlayerEntry>,
 }
 
 impl ZoneConnection {
@@ -308,6 +343,20 @@ impl ZoneConnection {
     }
 
     pub async fn begin_log_out(&mut self) {
+        // Drop the cutscene status before anything else, so observers stop seeing the icon on a
+        // player who dropped out mid-cutscene. The barrier this has to stay in front of is
+        // `commit_player_data` below, not the `is_online` assignment right after: the mask is
+        // computed from the DB (`determine_base_online_status_mask`), so once the commit has
+        // written `is_online = false` the mask no longer carries `Online` and the cutscene bit,
+        // which is only ever layered on top of it, can no longer be cleared from it. This is the
+        // funnel for both a graceful logout and a forced one after a network drop.
+        //
+        // The inn bed IS one of these: retail keeps the player online for the whole sleep
+        // animation -- it carries the `ViewingCutscene` status like any other cutscene -- and only
+        // sends LogOutComplete afterwards, between that scene and the log out scene. Our script
+        // matches that ordering, so this call is what takes the icon back down there.
+        self.end_watching_cutscene().await;
+
         // Mark the player as offline in the db.
         self.player_data.volatile.is_online = false;
 

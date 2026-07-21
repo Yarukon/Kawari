@@ -174,6 +174,7 @@ async fn initial_setup(
                     teleport_reason: TeleportReason::NotSpecified,
                     active_minion: 0,
                     party_id: 0,
+                    watching_cutscene: false,
                     rejoining_party: false,
                     login_time: None,
                     zone_initialize_sent: false,
@@ -199,6 +200,13 @@ async fn initial_setup(
                     is_trading: false,
                     director_vars: None,
                     dyeing_information: None,
+                    friend_enrich_pending: false,
+                    friend_enrich_sequence: 0,
+                    friend_enrich_pairs: Vec::new(),
+                    party_enrich_pending: false,
+                    party_enrich_sequence: 0,
+                    party_enrich_pairs: Vec::new(),
+                    party_enrich_entries: Vec::new(),
                 };
 
                 // Handle setup before passing off control to the zone connection.
@@ -2346,19 +2354,144 @@ async fn process_packet(
                         }
                     }
                     ClientZoneIpcData::SocialListRequest(request) => {
-                        if request.request_type == SocialListRequestType::Friends {
-                            // We have to refresh manually here as the friend list doesn't have a convenient search & result opcode pair like searching does.
-                            connection.refresh_friend_list().await;
+                        match request.request_type {
+                            SocialListRequestType::Friends => {
+                                // The friend list has no separate search/result opcode pair, so we
+                                // refresh manually. "First page" is keyed on the client's authoritative
+                                // page cursor (`next_index == 0`), NOT on `friend_results` being empty
+                                // (a fragile server-side proxy that mis-fires under re-entrancy).
+                                if request.next_index == 0 {
+                                    if connection.friend_enrich_pending {
+                                        // A duty-enrichment round-trip is already in flight (concurrent
+                                        // or re-entrant reopen). Just record the latest sequence the
+                                        // response should answer with, and wait for it -- do NOT rebuild
+                                        // or fire a second request, which would drain an un-enriched page.
+                                        connection.friend_enrich_sequence = request.sequence;
+                                    } else {
+                                        connection.refresh_friend_list().await;
+                                        connection.friend_enrich_pending = true;
+                                        connection.friend_enrich_sequence = request.sequence;
+                                        let pairs = connection.friend_enrich_pairs.clone();
+                                        let sent = connection.request_social_list_duty_enrichment(
+                                            SocialListRequestType::Friends,
+                                            request.sequence,
+                                            pairs,
+                                        );
+                                        if !sent {
+                                            // Outbound request dropped (full/closed world-server
+                                            // channel): never leave the window hanging. Degrade to the
+                                            // un-enriched base list -- correct, just missing duty icons.
+                                            connection.friend_enrich_pending = false;
+                                            connection
+                                                .send_social_list(
+                                                    SocialListRequestType::Friends,
+                                                    request.sequence,
+                                                    None,
+                                                    None,
+                                                )
+                                                .await;
+                                        }
+                                        // sent == true: the first page is sent from the deferred
+                                        // FromServer::SocialListDutyRelations arm when the response
+                                        // arrives.
+                                    }
+                                } else if connection.friend_enrich_pending {
+                                    // A first-page enrichment round-trip is still in flight, so
+                                    // `friend_results` is NOT yet enriched. Draining a later page now
+                                    // would emit un-enriched entries AND advance `friend_index`, so the
+                                    // deferred F2 response would then enrich/send only the tail and page
+                                    // one would be lost for this session. Defer instead: record the
+                                    // latest sequence and let the in-flight F2 response send page one
+                                    // enriched (exactly like the pending-reopen case above). A
+                                    // conforming client cannot reach this (it can't know next_index
+                                    // until page one lands), but the guard keeps the invariant robust.
+                                    connection.friend_enrich_sequence = request.sequence;
+                                } else {
+                                    // Subsequent pages: `friend_results` is already enriched (the
+                                    // relations were applied to the whole list before the first drain),
+                                    // so no round-trip is needed -- just paginate.
+                                    connection
+                                        .send_social_list(
+                                            SocialListRequestType::Friends,
+                                            request.sequence,
+                                            None,
+                                            None,
+                                        )
+                                        .await;
+                                }
+                            }
+                            SocialListRequestType::Party => {
+                                // The party list is single-page (`send_social_list` emits the whole
+                                // vec in one IPC), so there is no "subsequent page" case: every
+                                // request rebuilds and (when there is something to enrich) fires one
+                                // duty-enrichment round-trip, mirroring the friend machine's
+                                // hardening (re-entrancy guard, degrade-on-`!sent`, never hang).
+                                if connection.party_enrich_pending {
+                                    // A round-trip is already in flight (rapid reopen). Record the
+                                    // latest sequence the response should answer with and wait --
+                                    // do NOT rebuild or fire a second request.
+                                    connection.party_enrich_sequence = request.sequence;
+                                } else {
+                                    connection.refresh_party_list();
+                                    if connection.party_enrich_pairs.is_empty() {
+                                        // Defensive path: nothing resolvable to enrich. The viewer's
+                                        // own row is part of the enrichment set and is always
+                                        // online, so in practice this only fires if the entry list
+                                        // itself came back empty. Send the base list synchronously
+                                        // -- no round-trip, and the window can never hang.
+                                        let entries =
+                                            std::mem::take(&mut connection.party_enrich_entries);
+                                        connection
+                                            .send_social_list(
+                                                SocialListRequestType::Party,
+                                                request.sequence,
+                                                Some(entries),
+                                                None,
+                                            )
+                                            .await;
+                                    } else {
+                                        connection.party_enrich_pending = true;
+                                        connection.party_enrich_sequence = request.sequence;
+                                        let pairs = connection.party_enrich_pairs.clone();
+                                        let sent = connection.request_social_list_duty_enrichment(
+                                            SocialListRequestType::Party,
+                                            request.sequence,
+                                            pairs,
+                                        );
+                                        if !sent {
+                                            // Outbound request dropped (full/closed world-server
+                                            // channel): never hang the window. Degrade to the
+                                            // un-enriched stashed base list.
+                                            connection.party_enrich_pending = false;
+                                            let entries = std::mem::take(
+                                                &mut connection.party_enrich_entries,
+                                            );
+                                            connection
+                                                .send_social_list(
+                                                    SocialListRequestType::Party,
+                                                    request.sequence,
+                                                    Some(entries),
+                                                    None,
+                                                )
+                                                .await;
+                                        }
+                                        // sent == true: the list is sent from the deferred
+                                        // FromServer::SocialListDutyRelations arm when the response
+                                        // arrives.
+                                    }
+                                }
+                            }
+                            _ => {
+                                connection
+                                    .send_social_list(
+                                        request.request_type,
+                                        request.sequence,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                            }
                         }
-                        let entries = if request.request_type == SocialListRequestType::Party {
-                            Some(connection.party_member_entries())
-                        } else {
-                            None
-                        };
-
-                        connection
-                            .send_social_list(request.request_type, request.sequence, entries, None)
-                            .await;
                     }
                     ClientZoneIpcData::UpdatePositionHandler {
                         position,
@@ -4532,6 +4665,39 @@ async fn process_server_msg(
                         ipc,
                     ))
                     .await;
+            }
+            FromServer::SocialListDutyRelations(list_type, _sequence, relations) => {
+                // The server answered our duty-enrichment round-trip. Dispatch on the echoed
+                // `list_type` to apply the viewer-relative InDuty/AnotherWorld bits (Channel B) to
+                // the right social list, then send the deferred page. Reply with the latest sequence
+                // the client asked for (which may have advanced past `_sequence` if the list was
+                // reopened while this round-trip was in flight -- see the re-entrancy guards in the
+                // SocialListRequest handler).
+                match list_type {
+                    SocialListRequestType::Friends => {
+                        connection.apply_friend_duty_relations(&relations);
+                        connection.friend_enrich_pending = false;
+                        let sequence = connection.friend_enrich_sequence;
+                        connection
+                            .send_social_list(SocialListRequestType::Friends, sequence, None, None)
+                            .await;
+                    }
+                    SocialListRequestType::Party => {
+                        connection.apply_party_duty_relations(&relations);
+                        connection.party_enrich_pending = false;
+                        let sequence = connection.party_enrich_sequence;
+                        let entries = std::mem::take(&mut connection.party_enrich_entries);
+                        connection
+                            .send_social_list(
+                                SocialListRequestType::Party,
+                                sequence,
+                                Some(entries),
+                                None,
+                            )
+                            .await;
+                    }
+                    _ => {}
+                }
             }
             FromServer::NewTasks(mut tasks) => {
                 connection.queued_tasks.append(&mut tasks);

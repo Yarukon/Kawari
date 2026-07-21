@@ -58,7 +58,7 @@ use kawari::{
 };
 
 use super::{ClientId, FromServer, ToServer};
-use crate::common::PetCommand;
+use crate::common::{DutyRelation, PetCommand, duty_relation};
 
 mod action;
 mod actor;
@@ -3234,6 +3234,45 @@ pub async fn server_main_loop(
                         DestinationNetwork::ZoneClients,
                     );
                 }
+                ToServer::SocialListDutyRequest(viewer_actor_id, list_type, sequence, targets) => {
+                    // Viewer-relative social-list (friends/party) duty enrichment (Channel B). This
+                    // is the one site where the "same duty instance?" signal (only in
+                    // `data.instances`) is read. `list_type` is opaque here -- it is echoed back so
+                    // the connection routes the relations to the right list. DB-free, so no new lock
+                    // ordering vs the other data+network handlers.
+                    let data = data.lock();
+                    let mut network = network.lock();
+
+                    // Build a single reverse map actor_id -> (instance_id, cfc) in one pass over
+                    // all instances, instead of N+1 `find_actor_instance` scans. O(total actors)
+                    // once, then O(1) per target lookup while holding the global data lock.
+                    let mut actor_inst: HashMap<ObjectId, (u64, u16)> = HashMap::new();
+                    for inst in &data.instances {
+                        for aid in inst.actors.keys() {
+                            actor_inst
+                                .insert(*aid, (inst.instance_id, inst.content_finder_condition_id));
+                        }
+                    }
+
+                    let viewer = actor_inst.get(&viewer_actor_id).copied();
+                    let relations: Vec<(u64, DutyRelation)> = targets
+                        .iter()
+                        .map(|(cid, aid)| {
+                            (*cid, duty_relation(viewer, actor_inst.get(aid).copied()))
+                        })
+                        .collect();
+
+                    // Always respond, even if the viewer is not instanced or `targets` is empty:
+                    // the connection waits on exactly one response and must never hang. Routes by
+                    // actor id (like ExamineResponse); a full viewer channel tears the connection
+                    // down rather than leaving it spinning. Echo `list_type` so the connection
+                    // dispatches to the correct social list.
+                    network.send_to_by_actor_id(
+                        viewer_actor_id,
+                        FromServer::SocialListDutyRelations(list_type, sequence, relations),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
                 ToServer::Disconnected(from_id, from_actor_id) => {
                     let mut network = network.lock();
                     network.to_remove.push(from_id);
@@ -3803,7 +3842,25 @@ pub async fn server_main_loop(
                     }
                 }
                 ToServer::SetOnlineStatus(from_actor_id, online_status) => {
-                    let data = data.lock();
+                    let mut data = data.lock();
+
+                    // Keep the stored spawn in step with the broadcast below. The broadcast only
+                    // reaches players who are already in range, so without this an observer who
+                    // arrives later -- zoning back in, or simply walking up -- is sent whatever
+                    // status the actor happened to carry when it spawned. That is how a party icon
+                    // survives on someone whose party disbanded while the observer was in another
+                    // zone, and it strands every other transient status the same way.
+                    //
+                    // `ZoneConnection::respawn_player` fills this field from
+                    // `nametag_online_status()`, which is exactly what is being broadcast here, so
+                    // the stored value and the wire value stay the same shape.
+                    if let Some(instance) = data.find_actor_instance_mut(from_actor_id)
+                        && let Some(actor) = instance.find_actor_mut(from_actor_id)
+                        && let Some(spawn) = actor.get_player_spawn_mut()
+                    {
+                        spawn.online_status = online_status;
+                    }
+
                     let mut network = network.lock();
                     network.send_ac_in_range_inclusive(
                         &data,
@@ -3811,6 +3868,21 @@ pub async fn server_main_loop(
                         ActorControlCategory::SetStatusIcon {
                             icon: online_status,
                         },
+                    );
+                }
+                ToServer::SetPartyMemberCutsceneFlags(from_actor_id, unk2) => {
+                    let mut network = network.lock();
+                    // Retail sends this as an ActorControlSelf to every party member (the actor it
+                    // applies to is a payload field, not the packet's source), so the marker shows
+                    // up next to the right row in everyone's party list.
+                    network.send_to_party_or_self(
+                        from_actor_id,
+                        FromServer::ActorControlSelf(
+                            ActorControlCategory::SetPartyMemberCutsceneFlags {
+                                actor_id: from_actor_id,
+                                unk2,
+                            },
+                        ),
                     );
                 }
                 ToServer::SetCharacterMode(from_actor_id, mode, arg) => {

@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -29,6 +32,16 @@ use parking_lot::Mutex;
 
 static DEFAULT_TIMELINE: OnceLock<Timeline> = OnceLock::new();
 static BASE_TIMELINES: OnceLock<HashMap<u32, Timeline>> = OnceLock::new();
+
+/// Monotonic source of unique `Instance::instance_id` values. Starts at 1 so that 0 stays reserved
+/// as "none/unassigned" (the value `Instance::default()` leaves in place). Never reused within a
+/// server run; resetting across restarts is fine since instances are runtime-only.
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate the next unique instance id. See [`NEXT_INSTANCE_ID`].
+fn next_instance_id() -> u64 {
+    NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 fn default_timeline() -> Timeline {
     DEFAULT_TIMELINE
@@ -217,6 +230,12 @@ pub struct Instance {
     pub zone: Zone,
     pub weather_id: u16,
     pub content_finder_condition_id: u16,
+    /// Stable, process-unique identifier for this instance, assigned once at creation and never
+    /// reused (survives the `cleanup_dead_instances` `retain` compaction, unlike the Vec slot).
+    /// `0` means "none/unassigned" (the `Default`); every production instance is built via
+    /// `Instance::new`, which assigns a real id. Used to answer "are these two actors in the SAME
+    /// duty instance?" for viewer-relative friend-list duty status.
+    pub instance_id: u64,
     /// If Some, then this is the path of the navmesh we need to generate.
     pub generate_navmesh: NavmeshGenerationStep,
     /// List of tasks that has to be executed an arbitrary point in the future.
@@ -241,6 +260,10 @@ impl Instance {
         let mut instance = Instance {
             zone: Zone::load(game_data, id),
             weather_id: game_data.get_weather(id as u32).unwrap_or_default() as u16,
+            // Assign an explicit id here (NOT via `..Default::default()`, which would leave it 0 and
+            // silently downgrade a real duty instance's friend-list status from InDuty to
+            // AnotherWorld).
+            instance_id: next_instance_id(),
             ..Default::default()
         };
 
@@ -585,5 +608,21 @@ mod tests {
         // Both players commenced; the non-player object is ignored.
         instance.commenced_actors.insert(ObjectId(2));
         assert!(instance.all_players_commenced());
+    }
+
+    #[test]
+    fn instance_id_source_is_unique_and_monotonic() {
+        // Successive allocations are distinct and strictly increasing, and never 0 (0 is the
+        // reserved "none/unassigned" sentinel).
+        let a = next_instance_id();
+        let b = next_instance_id();
+        let c = next_instance_id();
+        assert!(a >= 1 && b > a && c > b);
+    }
+
+    #[test]
+    fn default_instance_id_is_zero() {
+        // `Instance::default()` leaves the id at the reserved 0; only `Instance::new` assigns one.
+        assert_eq!(Instance::default().instance_id, 0);
     }
 }

@@ -1,12 +1,13 @@
 // ! The party system, including the strategy board, waymarks and target signs. Ready checks are handled in the global server state.
-use crate::{ZoneConnection, common::PartyUpdateTargets};
+use super::friends::apply_duty_relations_to_entries;
+use crate::{DutyRelation, ZoneConnection, common::PartyUpdateTargets};
 use kawari::{
     common::{ObjectId, ObjectTypeId},
     ipc::chat::{ChatChannel, ChatChannelType},
     ipc::zone::{
-        ActorControlCategory, PartyMemberEntry, PartyUpdateStatus, PlayerEntry, ServerZoneIpcData,
-        ServerZoneIpcSegment, StrategyBoard, StrategyBoardUpdate, WaymarkPlacementMode,
-        WaymarkPosition, WaymarkPreset,
+        ActorControlCategory, OnlineStatus, PartyMemberEntry, PartyUpdateStatus, PlayerEntry,
+        ServerZoneIpcData, ServerZoneIpcSegment, StrategyBoard, StrategyBoardUpdate,
+        WaymarkPlacementMode, WaymarkPosition, WaymarkPreset,
     },
 };
 impl ZoneConnection {
@@ -141,6 +142,56 @@ impl ZoneConnection {
         }
 
         entries
+    }
+
+    /// Rebuild the base party-member entries and resolve the enrichment pairs for a "first page"
+    /// party-list request. Mirrors `refresh_friend_list`. The party list is single-page, so this
+    /// stashes the whole entry vec on the connection (`party_enrich_entries`) to survive the
+    /// duty-enrichment round-trip await, then resolves `(content_id, actor_id)` pairs for the
+    /// members that will actually be enriched.
+    pub fn refresh_party_list(&mut self) {
+        // Build the base entries (locks db+gamedata internally, releases on return). Solo / no party
+        // yields a single self-entry.
+        let entries = self.party_member_entries();
+
+        // Resolve pairs for currently-online members, INCLUDING the viewer's own row. Unlike the
+        // friend list (where the viewer never appears), the party list always contains the viewer
+        // and the client draws that row's icon from the same mask -- so skipping self left the
+        // sprout / party-leader icons on our own row while in a duty. `duty_relation` resolves
+        // viewer == target to the viewer's own instance: `InDuty` inside a duty, `None` in the
+        // overworld. A `None` relation leaves the mask completely untouched, so the sprout/leader
+        // icons still show outside duties. Offline members can't share the viewer's instance, so
+        // they are trimmed. `character.actor_id` is the linchpin id that keys `Instance.actors`, so
+        // online members resolve into their live instance server-side; for the viewer we use the
+        // live connection value instead of a DB lookup.
+        let own_content_id = self.player_data.character.content_id as u64;
+        let own_actor_id = self.player_data.character.actor_id;
+        let online_content_ids: Vec<u64> = entries
+            .iter()
+            .filter(|e| e.content_id != 0 && e.online_status_mask.has_status(OnlineStatus::Online))
+            .map(|e| e.content_id)
+            .collect();
+        {
+            let mut db = self.database.lock();
+            self.party_enrich_pairs = online_content_ids
+                .into_iter()
+                .map(|cid| {
+                    if cid == own_content_id {
+                        (cid, own_actor_id)
+                    } else {
+                        (cid, db.find_actor_id(cid))
+                    }
+                })
+                .collect();
+        }
+        self.party_enrich_entries = entries;
+    }
+
+    /// Apply the server's viewer-relative duty relations onto this connection's stashed party
+    /// entries (Channel B). Routes through the shared [`apply_duty_relations_to_entries`], which is
+    /// the sole producer of the `InDuty`/`AnotherWorld` bits.
+    pub fn apply_party_duty_relations(&mut self, relations: &[(u64, DutyRelation)]) {
+        apply_duty_relations_to_entries(&mut self.party_enrich_entries, relations);
     }
 
     pub fn is_in_party(&self) -> bool {

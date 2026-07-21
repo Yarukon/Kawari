@@ -57,6 +57,15 @@ impl ZoneConnection {
         lua_zone: &LuaZone,
         lua_content: &mut LuaContent,
     ) {
+        // A cutscene never survives a zone transition here: the client is torn down and rebuilt for
+        // the new territory, and no script of ours warps in the middle of a scene. Clearing the
+        // status is what stops it getting stuck when a cutscene is abandoned by the transition
+        // instead of finishing — leaving a duty while its entry cutscene is still playing is the
+        // easy way to hit that, since the scene's `on_return` (which calls `finish_event`) never
+        // arrives. Every cross-zone transition (duty enter/leave, teleport, warp) funnels through
+        // here; a same-zone warp doesn't, but it also doesn't disturb the event it was called from.
+        self.end_watching_cutscene().await;
+
         self.spawned_in = false;
         self.zone_in_confirmed = false;
 
