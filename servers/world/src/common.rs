@@ -26,9 +26,10 @@ use kawari::{
             ActionRequest, ActorControlCategory, CWLSLeaveReason, CWLSPermissionRank,
             ClientTrigger, Conditions, Config, ContentFinderUserAction, CrossworldLinkshellInvite,
             InviteReply, InviteType, OnlineStatus, PartyMemberEntry, PartyMemberPositions,
-            PartyPortraitEntry, PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment, SpawnNpc,
-            SpawnObject, SpawnPlayer, SpawnTreasure, StrategyBoard, StrategyBoardUpdate, WarpType,
-            WaymarkPlacementMode, WaymarkPosition, WaymarkPreset,
+            PartyPortraitEntry, PartyUpdateStatus, ReadyCheckReply, ServerZoneIpcSegment,
+            SocialListRequestType, SpawnNpc, SpawnObject, SpawnPlayer, SpawnTreasure,
+            StrategyBoard, StrategyBoardUpdate, WarpType, WaymarkPlacementMode, WaymarkPosition,
+            WaymarkPreset,
         },
     },
 };
@@ -93,6 +94,43 @@ pub enum PetCommand {
     Follow,
     Place(Position),
     Stay,
+}
+
+/// Viewer-relative duty relationship between a viewer and one target friend.
+///
+/// This is a **Channel B (friend/social list) only** concept: the resulting `InDuty` /
+/// `AnotherWorld` icons are set exclusively on a friend `PlayerEntry.online_status_mask` (see
+/// `apply_friend_duty_relations`). They must never enter the nametag channel's mask because they
+/// outrank `Online` by priority and would otherwise stamp a duty icon on the nameplate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DutyRelation {
+    /// Target is offline, not instanced, or in a non-duty (overworld/private) instance.
+    None,
+    /// Target is in a duty instance that is the viewer's own instance.
+    InDuty,
+    /// Target is in a duty instance that is not the viewer's.
+    AnotherWorld,
+}
+
+/// Viewer-relative duty relation for one target, from the viewer's perspective.
+///
+/// `viewer` / `target` are that actor's live instance descriptor `(instance_id, cfc_id)`, or
+/// `None` if the actor is not in any instance. A `cfc_id` of 0 marks a non-duty (overworld or
+/// private) instance. Pure function: no lock/async/DB dependency, so it is unit-tested in
+/// isolation (see the tests at the bottom of this file).
+pub fn duty_relation(viewer: Option<(u64, u16)>, target: Option<(u64, u16)>) -> DutyRelation {
+    let Some((t_id, t_cfc)) = target else {
+        return DutyRelation::None; // target offline / not instanced
+    };
+    if t_cfc == 0 {
+        return DutyRelation::None; // target in the overworld / a non-duty instance
+    }
+    match viewer {
+        // Same duty instance (a real instance, since id 0 is reserved for "none").
+        Some((v_id, _)) if v_id != 0 && v_id == t_id => DutyRelation::InDuty,
+        // A duty, but not the viewer's instance.
+        _ => DutyRelation::AnotherWorld,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +290,12 @@ pub enum FromServer {
     /// Ask this connection to build its examine IPC and relay it back.
     /// Carries the requester's actor id so the response can be routed.
     ExamineRequest(ObjectId),
+    /// The server loop's answer to a `ToServer::SocialListDutyRequest`: the viewer-relative duty
+    /// relation for each requested target. Fields: (list_type, sequence, [(content_id, relation)]).
+    /// `list_type` is echoed back opaquely (like `sequence`) so the connection dispatches the
+    /// relations to the right social list (friends/party). The connection sets the
+    /// InDuty/AnotherWorld bits on that list (Channel B) and sends the deferred first page.
+    SocialListDutyRelations(SocialListRequestType, u8, Vec<(u64, DutyRelation)>),
 }
 
 impl FromServer {
@@ -321,6 +365,7 @@ impl FromServer {
             Self::FurnitureTranslated(..) => "FurnitureTranslated",
             Self::TeleportOffered(..) => "TeleportOffered",
             Self::ExamineRequest(..) => "ExamineRequest",
+            Self::SocialListDutyRelations(..) => "SocialListDutyRelations",
         }
     }
 }
@@ -588,6 +633,12 @@ pub enum ToServer {
     /// (keyed by actor id) and rebroadcasts every stored entry to the pusher's instance so the full
     /// party portrait wall renders for everyone. Fields: (pusher_actor_id, entry)
     UpdatePartyPortrait(ObjectId, PartyPortraitEntry),
+    /// The viewer's connection asks the server loop (where `data.instances` is in scope) to compute
+    /// the viewer-relative duty relation for each of its currently-online social-list targets
+    /// (friends or party members). The server answers with a `FromServer::SocialListDutyRelations`,
+    /// echoing `list_type` so the connection routes the relations to the right list. Fields:
+    /// (viewer_actor_id, list_type, sequence, [(target_content_id, target_actor_id)]).
+    SocialListDutyRequest(ObjectId, SocialListRequestType, u8, Vec<(u64, ObjectId)>),
 }
 
 impl ToServer {
@@ -678,6 +729,7 @@ impl ToServer {
             Self::ExamineRequest(..) => "ExamineRequest",
             Self::ExamineResponse(..) => "ExamineResponse",
             Self::UpdatePartyPortrait(..) => "UpdatePartyPortrait",
+            Self::SocialListDutyRequest(..) => "SocialListDutyRequest",
         }
     }
 }
@@ -717,8 +769,93 @@ impl ServerHandle {
             }
         }
     }
+    /// Non-blocking send: try to enqueue `msg` without awaiting, returning whether the world-server
+    /// channel accepted it. Unlike [`send`](Self::send), this never blocks on a full channel and
+    /// never panics on a closed one — the caller decides how to degrade on failure (used by the
+    /// friend-list duty-enrichment fallback, which sends the un-enriched base list on a drop).
+    pub fn try_send(&self, msg: ToServer) -> bool {
+        self.chan.try_send(msg).is_ok()
+    }
+
     pub fn next_id(&self) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         ClientId(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `duty_relation` truth table (see PLAN.md §5/§8). Descriptors are `(instance_id, cfc_id)`.
+
+    #[test]
+    fn target_none_is_none() {
+        // Target offline / not in any instance -> neither icon, regardless of viewer.
+        assert_eq!(duty_relation(None, None), DutyRelation::None);
+        assert_eq!(duty_relation(Some((1, 0)), None), DutyRelation::None);
+        assert_eq!(duty_relation(Some((1, 200)), None), DutyRelation::None);
+    }
+
+    #[test]
+    fn target_overworld_is_none() {
+        // Target in a non-duty (cfc == 0) instance -> neither icon, whether the viewer is in a
+        // duty or in the overworld.
+        assert_eq!(duty_relation(None, Some((5, 0))), DutyRelation::None);
+        assert_eq!(
+            duty_relation(Some((1, 200)), Some((5, 0))),
+            DutyRelation::None
+        );
+        assert_eq!(
+            duty_relation(Some((5, 0)), Some((5, 0))),
+            DutyRelation::None
+        );
+    }
+
+    #[test]
+    fn same_duty_instance_is_in_duty() {
+        // Target in a duty, same instance id as the viewer -> InDuty.
+        assert_eq!(
+            duty_relation(Some((7, 200)), Some((7, 200))),
+            DutyRelation::InDuty
+        );
+        // The cfc ids need not match (matched content shares an instance id, not necessarily cfc).
+        assert_eq!(
+            duty_relation(Some((7, 199)), Some((7, 200))),
+            DutyRelation::InDuty
+        );
+    }
+
+    #[test]
+    fn different_duty_instance_is_another_world() {
+        // Target in a duty, different instance id -> AnotherWorld. This is the case that
+        // cfc-only comparison gets wrong (same content, different instance).
+        assert_eq!(
+            duty_relation(Some((7, 200)), Some((8, 200))),
+            DutyRelation::AnotherWorld
+        );
+    }
+
+    #[test]
+    fn viewer_none_target_in_duty_is_another_world() {
+        // Viewer in the overworld (or offline) sees a target who is in a duty as AnotherWorld.
+        assert_eq!(
+            duty_relation(None, Some((8, 200))),
+            DutyRelation::AnotherWorld
+        );
+    }
+
+    #[test]
+    fn viewer_zero_id_never_yields_in_duty() {
+        // A viewer whose instance id is 0 (unassigned/none) must never resolve to InDuty, even if
+        // the target's id is also 0 -- this guards the id==0 downgrade hazard (PLAN.md §1).
+        assert_eq!(
+            duty_relation(Some((0, 200)), Some((0, 200))),
+            DutyRelation::AnotherWorld
+        );
+        assert_eq!(
+            duty_relation(Some((0, 200)), Some((7, 200))),
+            DutyRelation::AnotherWorld
+        );
     }
 }

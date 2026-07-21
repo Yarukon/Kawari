@@ -58,7 +58,7 @@ use kawari::{
 };
 
 use super::{ClientId, FromServer, ToServer};
-use crate::common::PetCommand;
+use crate::common::{DutyRelation, PetCommand, duty_relation};
 
 mod action;
 mod actor;
@@ -3231,6 +3231,45 @@ pub async fn server_main_loop(
                     network.send_to_by_actor_id(
                         requester_actor_id,
                         FromServer::PacketSegment(ipc.clone(), target_actor_id),
+                        DestinationNetwork::ZoneClients,
+                    );
+                }
+                ToServer::SocialListDutyRequest(viewer_actor_id, list_type, sequence, targets) => {
+                    // Viewer-relative social-list (friends/party) duty enrichment (Channel B). This
+                    // is the one site where the "same duty instance?" signal (only in
+                    // `data.instances`) is read. `list_type` is opaque here -- it is echoed back so
+                    // the connection routes the relations to the right list. DB-free, so no new lock
+                    // ordering vs the other data+network handlers.
+                    let data = data.lock();
+                    let mut network = network.lock();
+
+                    // Build a single reverse map actor_id -> (instance_id, cfc) in one pass over
+                    // all instances, instead of N+1 `find_actor_instance` scans. O(total actors)
+                    // once, then O(1) per target lookup while holding the global data lock.
+                    let mut actor_inst: HashMap<ObjectId, (u64, u16)> = HashMap::new();
+                    for inst in &data.instances {
+                        for aid in inst.actors.keys() {
+                            actor_inst
+                                .insert(*aid, (inst.instance_id, inst.content_finder_condition_id));
+                        }
+                    }
+
+                    let viewer = actor_inst.get(&viewer_actor_id).copied();
+                    let relations: Vec<(u64, DutyRelation)> = targets
+                        .iter()
+                        .map(|(cid, aid)| {
+                            (*cid, duty_relation(viewer, actor_inst.get(aid).copied()))
+                        })
+                        .collect();
+
+                    // Always respond, even if the viewer is not instanced or `targets` is empty:
+                    // the connection waits on exactly one response and must never hang. Routes by
+                    // actor id (like ExamineResponse); a full viewer channel tears the connection
+                    // down rather than leaving it spinning. Echo `list_type` so the connection
+                    // dispatches to the correct social list.
+                    network.send_to_by_actor_id(
+                        viewer_actor_id,
+                        FromServer::SocialListDutyRelations(list_type, sequence, relations),
                         DestinationNetwork::ZoneClients,
                     );
                 }

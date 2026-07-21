@@ -222,6 +222,32 @@ pub struct ZoneConnection {
     pub director_vars: Option<ServerZoneIpcSegment>,
     /// Current dye action information.
     pub dyeing_information: Option<DyeInformation>,
+    /// True while a friend-list duty-enrichment round-trip is in flight (Channel B). Guards against
+    /// firing a second request (or draining an un-enriched page) if the client reopens/re-requests
+    /// the first page before the response arrives.
+    pub friend_enrich_pending: bool,
+    /// The sequence of the most recent first-page friend-list request; the enrichment response is
+    /// answered with this (it may have advanced past the in-flight request's sequence if the list
+    /// was reopened while the round-trip was pending).
+    pub friend_enrich_sequence: u8,
+    /// The (content_id, actor_id) pairs of currently-online friends, resolved in
+    /// `refresh_friend_list` and sent to the server loop for duty enrichment.
+    pub friend_enrich_pairs: Vec<(u64, ObjectId)>,
+    /// True while a party-list duty-enrichment round-trip is in flight (Channel B). Independent of
+    /// `friend_enrich_pending` so a Party and a Friends round-trip can be in flight concurrently
+    /// (tab-switch under latency) without cross-contaminating each other's list.
+    pub party_enrich_pending: bool,
+    /// The sequence of the most recent first-page party-list request; the enrichment response is
+    /// answered with this (it may have advanced past the in-flight request's sequence if the list
+    /// was reopened while the round-trip was pending).
+    pub party_enrich_sequence: u8,
+    /// The (content_id, actor_id) pairs of currently-online, non-self party members, resolved in
+    /// `refresh_party_list` and sent to the server loop for duty enrichment.
+    pub party_enrich_pairs: Vec<(u64, ObjectId)>,
+    /// The base party-member entries stashed by `refresh_party_list` to survive the enrichment
+    /// round-trip await; `apply_party_duty_relations` decorates them and the deferred send drains
+    /// them (the party list is single-page, so this is taken wholesale, not paginated).
+    pub party_enrich_entries: Vec<PlayerEntry>,
 }
 
 impl ZoneConnection {

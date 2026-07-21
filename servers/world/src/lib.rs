@@ -33,7 +33,8 @@ pub use custom_ipc_connection::CustomIpcConnection;
 
 mod common;
 pub use common::{
-    ClientHandle, ClientId, FromServer, MessageInfo, PetCommand, ServerHandle, ToServer,
+    ClientHandle, ClientId, DutyRelation, FromServer, MessageInfo, PetCommand, ServerHandle,
+    ToServer, duty_relation,
 };
 
 mod navmesh;
