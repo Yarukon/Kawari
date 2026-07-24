@@ -105,7 +105,9 @@ use crate::common::{
 };
 use crate::constants::{
     AVAILABLE_CLASSJOBS, COMPLETED_LEGACY_QUEST_BITMASK_SIZE, COMPLETED_LEVEQUEST_BITMASK_SIZE,
-    COMPLETED_QUEST_BITMASK_SIZE, TITLE_UNLOCK_BITMASK_SIZE, UNLOCKED_MAP_MARKERS_BITMASK_SIZE,
+    COMPLETED_QUEST_BITMASK_SIZE, COMPLETED_RECIPES_BITMASK_SIZE,
+    GATHERED_GATHERING_ITEMS_BITMASK_SIZE, TITLE_UNLOCK_BITMASK_SIZE,
+    UNLOCKED_MAP_MARKERS_BITMASK_SIZE,
 };
 pub use crate::ipc::zone::server::actor_move::ActorMove;
 
@@ -875,10 +877,16 @@ pub enum ServerZoneIpcData {
         immortal_flames_rank: u8,
     },
     CraftingLog {
-        unk1: [u8; 808],
+        #[brw(pad_after = 7)] // unaccounted for in the CS size
+        #[br(count = COMPLETED_RECIPES_BITMASK_SIZE)]
+        #[bw(pad_size_to = COMPLETED_RECIPES_BITMASK_SIZE)]
+        bitmask: Vec<u8>,
     },
     GatheringLog {
-        unk1: [u8; 104],
+        #[brw(pad_after = 2)] // unaccounted for in the CS size
+        #[br(count = GATHERED_GATHERING_ITEMS_BITMASK_SIZE)]
+        #[bw(pad_size_to = GATHERED_GATHERING_ITEMS_BITMASK_SIZE)]
+        bitmask: Vec<u8>,
     },
     Fellowships {
         unk1: [u8; 808],
@@ -1977,6 +1985,13 @@ pub enum ServerZoneIpcData {
         unk1: u32,
         /// Empty on the wire (16 bytes).
         padding: [u8; 16],
+    },
+    RecordGatheringLog {
+        /// Index into the bitmask.
+        index: u8,
+        /// New value at this index.
+        #[brw(pad_after = 6)] // unused
+        value: u8,
     },
 }
 

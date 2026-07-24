@@ -41,6 +41,7 @@ diesel::table! {
         completed_legacy -> Text,
         unlocked_map_markers -> Text,
         completed_levequests -> Text,
+        gathered_gathering_items -> Text,
     }
 }
 
