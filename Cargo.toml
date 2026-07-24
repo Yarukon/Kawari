@@ -122,26 +122,21 @@ glam = { version = "0.33", features = ["std"], default-features = false }
 # For Windows ANSI support
 nu-ansi-term = "0.50"
 
-# A fork of physis based on redstrate/main tip, plus two fixes upstream does not
+# A fork of physis based on redstrate/main tip, plus one fix upstream does not
 # have yet (branch sync/upstream-main-plus-fixes on Yarukon/Physis):
-#
-#   - Subrow sheets were read 6 bytes early, because `data_offset` is captured
-#     before the DataSectionHeader that — unlike for standard rows — cannot be
-#     skipped for subrow sheets. This corrupts GilShopItem, read by
-#     servers/world/src/gamedata.rs, and ClassJobActionUI, read by
-#     tools/actionaudit.
 #
 #   - Excel string columns hold SeStrings, whose macro chunks are frequently not
 #     valid UTF-8, so any string carrying one decoded to "". Of ActionTransient's
 #     51501 rows only 536 survived. The fork strips the macros and evaluates the
 #     integer expressions that hold values such as an action's potency.
 #
-# Also carries upstream layout/SCN/SGB work (EventObject size, SGStateMode Unk2,
-# etc.) that redstrate/Kawari bumps physis for. Drop this patch once upstream
-# physis carries the two excel fixes.
+# The subrow-read-6-bytes-early fix this fork used to carry is now upstream
+# (redstrate/physis "Fix regression when reading subrows in Excel sheets"), so
+# the branch was rebased onto upstream main and only the SeString fix remains.
+# Drop this patch entirely once upstream physis also decodes SeString columns.
 #
 # The patch must live here rather than on the workspace dependency above: icarus
 # also depends on redstrate/physis, and a plain fork URL would put two
 # incompatible physis crates in the graph.
 [patch."https://github.com/redstrate/physis"]
-physis = { git = "https://github.com/Yarukon/Physis", rev = "db33aecf3ea4b93ee9e4a1724de56cbd5c6954e0" }
+physis = { git = "https://github.com/Yarukon/Physis", rev = "e964f4ba3ea75d3701bf7058990d4b89c3ff444c" }
