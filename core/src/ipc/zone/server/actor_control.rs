@@ -629,6 +629,12 @@ pub enum ActorControlCategory {
         level: u32,
         /// Count column from the GatheringPoint Excel sheet.
         count: u32,
+        /// The remaining count of this GatheringPoint.
+        remaining_count: u32,
+        /// Unknown purpose, only seen zero so far.
+        unk1: u16,
+        /// The gathering bonuses for this GatheringPoint.
+        gathering_point_bonus: [u16; 2],
     },
 
     // Unsure what the purpose of this is, it's sent when someone else rides pillion on the player's mount

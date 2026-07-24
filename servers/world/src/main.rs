@@ -1737,9 +1737,11 @@ async fn process_packet(
                                 let base_id;
                                 let level;
                                 let count;
+                                let gathering_point_bonus;
                                 {
                                     let mut gamedata = connection.gamedata.lock();
-                                    (base_id, level, count) = gamedata.get_gathering_point(id);
+                                    (base_id, level, count, gathering_point_bonus) =
+                                        gamedata.get_gathering_point(id);
                                 }
 
                                 connection
@@ -1748,6 +1750,9 @@ async fn process_packet(
                                         base_id: base_id as u32,
                                         level: level as u32,
                                         count: count as u32,
+                                        remaining_count: count as u32,
+                                        unk1: 0,
+                                        gathering_point_bonus,
                                     })
                                     .await;
                             }
