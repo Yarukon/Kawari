@@ -1375,7 +1375,7 @@ impl Default for ClientTrigger {
 
 #[cfg(test)]
 mod tests {
-    use binrw::BinRead;
+    use binrw::{BinRead, BinWrite};
     use std::{fs::read, io::Cursor, path::PathBuf};
 
     use super::*;
@@ -1436,6 +1436,33 @@ mod tests {
                 params,
             }
         );
+    }
+
+    #[test]
+    fn read_start_cutscene_director_trigger() {
+        // Real retail capture: entering Zodiark's trial (InstanceContent 20080, HandlerId
+        // 0x80034E70) sends the duty's Cutscene row (2756) before the cutscene plays.
+        // The trailing param (0xB0 here) is uninitialized client stack memory, and must not
+        // be interpreted: `ExecuteCommand` never writes that dword.
+        let buffer = client_trigger_bytes(808, [0x80034E70, 0x40000001, 2756, 0, 0xB0], 0);
+        let mut cursor = Cursor::new(&buffer);
+
+        let trigger = ClientTrigger::read_le(&mut cursor).unwrap();
+        assert_eq!(
+            trigger.trigger,
+            ClientTriggerCommand::DirectorTrigger {
+                handler_id: HandlerId(0x80034E70),
+                trigger: DirectorTrigger::StartCutscene {
+                    cutscene: 2756,
+                    unk2: 0,
+                },
+            }
+        );
+
+        // Not modeling that param costs us nothing on the wire: `pad_size_to` zero-fills it.
+        let mut written = Cursor::new(Vec::new());
+        trigger.write_le(&mut written).unwrap();
+        assert_eq!(written.into_inner().len(), buffer.len());
     }
 
     #[test]
