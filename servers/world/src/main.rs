@@ -1425,22 +1425,31 @@ async fn process_packet(
                                         // dummied out
                                     }
                                     DirectorTrigger::SubclassCommand1 { .. } => {
-                                        // hardcoded for now
-
-                                        connection
-                                            .actor_control_self(
-                                                ActorControlCategory::DirectorEvent {
-                                                    handler_id,
-                                                    event: DirectorEvent::Unknown {
-                                                        id: 9,
-                                                        arg1: 74,
-                                                        arg2: 1,
-                                                        arg3: 0,
-                                                        arg4: 0,
+                                        // This magic is namespaced by the director class: it is
+                                        // command 1 of the most-derived director, sent from its
+                                        // vf2 (init) slot by ~20 different directors. The response
+                                        // below is the hardcoded startup script for the Air Force
+                                        // One Gold Saucer GATE, so only run it for Gold Saucer
+                                        // directors; otherwise we'd spawn an NPC and drive a GATE
+                                        // script on Frontline, Occult Crescent, dungeons, etc.
+                                        // TODO: narrow further to the GFateRideShooting GATE
+                                        // (GFateRideShooting sheet row 760) once the active GATE
+                                        // is modelled instead of hardcoded.
+                                        if handler_id.handler_type() == HandlerType::GoldSaucer {
+                                            connection
+                                                .actor_control_self(
+                                                    ActorControlCategory::DirectorEvent {
+                                                        handler_id,
+                                                        event: DirectorEvent::Unknown {
+                                                            id: 9,
+                                                            arg1: 74,
+                                                            arg2: 1,
+                                                            arg3: 0,
+                                                            arg4: 0,
+                                                        },
                                                     },
-                                                },
-                                            )
-                                            .await;
+                                                )
+                                                .await;
 
                                             connection
                                                 .actor_control_self(
@@ -1457,28 +1466,33 @@ async fn process_packet(
                                                 )
                                                 .await;
 
-                                        connection
-                                            .actor_control_self(
-                                                ActorControlCategory::DirectorEvent {
-                                                    handler_id,
-                                                    event: DirectorEvent::Unknown {
-                                                        id: 11,
-                                                        arg1: 3,
-                                                        arg2: 0,
-                                                        arg3: 0,
-                                                        arg4: 0,
+                                            connection
+                                                .actor_control_self(
+                                                    ActorControlCategory::DirectorEvent {
+                                                        handler_id,
+                                                        event: DirectorEvent::Unknown {
+                                                            id: 11,
+                                                            arg1: 3,
+                                                            arg2: 0,
+                                                            arg3: 0,
+                                                            arg4: 0,
+                                                        },
                                                     },
-                                                },
-                                            )
-                                            .await;
+                                                )
+                                                .await;
 
-                                        connection
-                                            .handle
-                                            .send(ToServer::SpawnLayoutNpc(
-                                                connection.player_data.character.actor_id,
-                                                7773571, // TODO: hardcoded to airforce one NPC for now
-                                            ))
-                                            .await;
+                                            connection
+                                                .handle
+                                                .send(ToServer::SpawnLayoutNpc(
+                                                    connection.player_data.character.actor_id,
+                                                    7773571, // TODO: hardcoded to airforce one NPC for now
+                                                ))
+                                                .await;
+                                        } else {
+                                            tracing::info!(
+                                                "DirectorTrigger: {handler_id} {trigger:?}"
+                                            );
+                                        }
                                     }
                                     DirectorTrigger::SubclassCommand2 { arg1, .. } => {
                                         // This magic is namespaced by the director class: it is a
