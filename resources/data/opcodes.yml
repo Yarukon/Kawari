@@ -787,6 +787,10 @@ ServerZoneIpcType:
   comment: Adventurer plate information.
   opcode: 482
   size: 480
+- name: RecordGatheringLog
+  comment: Sent when a new item is recorded in the gathering log.
+  opcode: 878
+  size: 8
 - name: RequestAdventurerPlateError
   comment: Sent instead of AdventurerPlate when the plate request cannot be fulfilled - the target has no plate set, it is not visible to the viewer, or the data is otherwise unavailable. body[0] is a LogMessage row id (5856 = not set, 5858 = not public, 5860 = other reason).
   opcode: 610

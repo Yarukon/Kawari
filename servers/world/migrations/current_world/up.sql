@@ -16,6 +16,7 @@ CREATE TABLE `quest`(
 	`completed_legacy` TEXT NOT NULL,
 	`unlocked_map_markers` TEXT NOT NULL,
 	`completed_levequests` TEXT NOT NULL,
+	`gathered_gathering_items` TEXT NOT NULL,
 	FOREIGN KEY (`content_id`) REFERENCES `character`(`content_id`)
 );
 
