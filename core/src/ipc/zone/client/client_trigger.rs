@@ -533,19 +533,12 @@ pub enum ClientTriggerCommand {
     #[brw(magic = 429u32)]
     AbandonMobHuntBill { index: u32, mark_id: u32 },
 
+    /// The player is preparing to remove materia.
     #[brw(magic = 437u32)]
     ExtractMateria {
         #[brw(pad_size_to = 4)] // ContainerType is u16
         container_type: ContainerType,
         container_index: u32,
-    },
-
-    /// The player is preparing to remove materia.
-    #[brw(magic = 437u32)]
-    PrepareRemoveMateria {
-        #[brw(pad_size_to = 4)] // ContainerType is u16
-        dst_container_type: ContainerType,
-        dst_container_index: u32,
     },
 
     /// The player is preparing to cast a glamour.
