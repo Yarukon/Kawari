@@ -1294,6 +1294,21 @@ pub enum ClientTriggerCommand {
     #[brw(magic = 2653u32)]
     OpenDutySupportWindow {},
 
+    /// The client asks to retrieve (拆) the last materia melded into an item, opening the
+    /// `Materialize` event that the retrieval action then runs inside.
+    #[brw(magic = 2800u32)]
+    RequestMateriaRetrieval {
+        /// `HandlerType::Materialize` + event id, e.g. `0x00390001`.
+        handler_id: u32,
+        #[brw(pad_size_to = 4)] // ContainerType is u16
+        container: ContainerType,
+        container_index: u32,
+        /// HQ items arrive as `real_id + 1_000_000`.
+        item_id_hq: u32,
+        /// Always 144 (0x90) in captures; purpose unknown, so it is never validated.
+        unk1: u32,
+    },
+
     /// The client opens the Portrait window.
     #[brw(magic = 3200u32)]
     OpenPortraitsWindow {},

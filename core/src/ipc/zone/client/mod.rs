@@ -29,6 +29,9 @@ pub use queue_duties::{DutyFinderSetting, QueueDuties};
 mod dye_information;
 pub use dye_information::DyeInformation;
 
+mod meld_request;
+pub use meld_request::MeldMateriaRequest;
+
 mod save_glamour_plate;
 pub use save_glamour_plate::SaveGlamourPlate;
 
@@ -715,6 +718,7 @@ pub enum ClientZoneIpcData {
         unk1: [u8; 24],
     },
     DyeInformation(DyeInformation),
+    MeldMateriaRequest(MeldMateriaRequest),
     SaveGlamourPlate(SaveGlamourPlate),
 }
 

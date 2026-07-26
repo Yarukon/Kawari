@@ -864,6 +864,10 @@ ClientZoneIpcType:
   comment: Information about the dye about to be applied.
   opcode: 380
   size: 24
+- name: MeldMateriaRequest
+  comment: Sent by the client to request melding a materia onto an equipped item (self-meld path).
+  opcode: 812
+  size: 24
 - name: StartTalkEvent
   comment: Unknown purpose.
   opcode: 601

@@ -39,6 +39,9 @@ pub enum EventType {
     Housing = 22,
     Say = 23,
     TableGame = 24,
+    /// Retrieving (拆) a materia from an item. Note this is NOT [`EventType::MateriaCraft`], which
+    /// no captured meld or retrieval flow ever sends.
+    MateriaRetrieval = 25,
 }
 
 #[cfg(feature = "server")]

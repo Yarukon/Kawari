@@ -37,7 +37,7 @@ pub mod plate;
 pub use plate::PlateStorage;
 
 mod item;
-pub use item::Item;
+pub use item::{Item, item_id_base};
 
 mod storage;
 pub use storage::{Storage, get_next_free_slot};
@@ -578,6 +578,22 @@ impl Inventory {
             }
 
             if let Some(info) = data.get_item_info(ItemInfoQuery::ById(item.item_id)) {
+                let mut materia = item.materia;
+                let mut materia_grades = item.materia_grades;
+
+                // Backfill a materia's own identity (slot 0) for items saved before that was
+                // written, so existing characters don't have to re-acquire their materia. New items
+                // already get this from `Item::new`.
+                //
+                // Only filled in when empty: melded gear legitimately uses these same fields for the
+                // materia stuck into it, and must not be overwritten.
+                if materia[0] == 0
+                    && let Some((row, grade_index)) = info.materia_identity
+                {
+                    materia[0] = row;
+                    materia_grades[0] = grade_index;
+                }
+
                 *item = Item {
                     quantity: item.quantity,
                     item_id: item.item_id,
@@ -586,8 +602,8 @@ impl Inventory {
                     condition: item.condition,
                     spiritbond_or_collectability: item.spiritbond_or_collectability,
                     glamour_id: item.glamour_id,
-                    materia: item.materia,
-                    materia_grades: item.materia_grades,
+                    materia,
+                    materia_grades,
                     stains: item.stains,
                     ..info.into()
                 };

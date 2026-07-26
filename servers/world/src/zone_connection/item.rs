@@ -17,6 +17,28 @@ use strum::IntoEnumIterator;
 
 const DYE_RESULT_LOG_MESSAGE: u32 = 0xBC77;
 
+/// Which materia slot a retrieval (拆) takes: the last melded one, or `None` if the item has none.
+///
+/// Retrieval removes exactly one materia, never the whole set -- the captures show an item holding
+/// `[17, 16]` becoming `[17]`. Getting this wrong would silently wipe a player's melds.
+fn retrieval_target_slot(materia: &[u16; 5]) -> Option<usize> {
+    materia.iter().rposition(|&row| row != 0)
+}
+
+/// "<player>从<item>上取下了魔晶石。" -- announces the retrieval itself. Param 1 = the item.
+const RETRIEVAL_STARTED_LOG_MESSAGE: u32 = 1953;
+/// "成功回收了<materia>！" -- the materia survived. Param 1 = the materia.
+const RETRIEVAL_RECOVERED_LOG_MESSAGE: u32 = 1954;
+/// "<materia>化成了粉末……" -- the materia shattered. Param 1 = the materia.
+const RETRIEVAL_SHATTERED_LOG_MESSAGE: u32 = 1955;
+
+/// ActionTimeline `emote/joy`, played when a retrieved materia is recovered intact.
+const RETRIEVAL_SUCCESS_TIMELINE: u32 = 708;
+/// VFX `cft_noncft_matok0`, the sparkle on a successful retrieval.
+const RETRIEVAL_SUCCESS_VFX: u32 = 435;
+/// VFX `itm_act_mis0f`, the puff when the materia shatters instead.
+const RETRIEVAL_FAILURE_VFX: u32 = 322;
+
 impl ZoneConnection {
     /// Inform other clients (including yourself) that you changed your equipped model ids.
     pub async fn inform_equip(&mut self) {
@@ -227,6 +249,178 @@ impl ZoneConnection {
 
         self.send_stats().await;
         self.update_class_info().await;
+    }
+
+    /// Carries out a materia retrieval (拆) prepared by ClientTrigger 2800, once the client has
+    /// cast the retrieval action inside the event.
+    ///
+    /// Only the LAST melded materia is removed, never the whole set. The materia is always removed
+    /// from the item; whether the player gets it back is a `MateriaGrade.ReturnRate` roll, and on a
+    /// failed roll it simply shatters (100% for grades 壹型-拾型, 80% for 拾壹型, 40% for 拾贰型).
+    pub async fn finish_materia_retrieval(&mut self) {
+        let Some(retrieval) = self.materia_retrieval.take() else {
+            tracing::warn!("finish_materia_retrieval called without a retrieval prepared?!");
+            return;
+        };
+
+        // Find the last melded materia. The captures prove retrieval takes exactly this one: an
+        // item holding [17, 16] became [17], not [].
+        let Some(item) = self
+            .player_data
+            .inventory
+            .get_item(retrieval.container, retrieval.slot)
+        else {
+            tracing::warn!("finish_materia_retrieval: item vanished mid-retrieval?!");
+            return;
+        };
+
+        let Some(last_index) = retrieval_target_slot(&item.materia) else {
+            tracing::warn!("finish_materia_retrieval: item has no materia to retrieve?!");
+            return;
+        };
+
+        let materia_row = item.materia[last_index];
+        let grade_index = item.materia_grades[last_index];
+
+        let (materia_item_id, return_rate) = {
+            let game_data = self.gamedata.lock();
+            (
+                game_data.get_materia_item_id(materia_row, grade_index),
+                game_data.get_materia_return_rate(grade_index),
+            )
+        };
+
+        // `fastrand::u8(0..100)` yields 0..=99, so `< rate` is exactly `rate` chances in a hundred.
+        let recovered =
+            return_rate.is_none_or(|rate| rate >= 100 || fastrand::u8(0..100) < rate);
+
+        // The materia leaves the item either way -- a failed roll shatters it.
+        if let Some(item) = self
+            .player_data
+            .inventory
+            .get_item_mut(retrieval.container, retrieval.slot)
+        {
+            item.materia[last_index] = 0;
+            item.materia_grades[last_index] = 0;
+        }
+
+        let returned_to_inventory = if recovered {
+            match materia_item_id {
+                Some(materia_item_id) => {
+                    let info = {
+                        let mut game_data = self.gamedata.lock();
+                        game_data.get_item_info(ItemInfoQuery::ById(materia_item_id))
+                    };
+                    match info {
+                        Some(info) => self
+                            .player_data
+                            .inventory
+                            .add_in_next_free_slot(Item::new(&info, 1))
+                            .is_some(),
+                        None => false,
+                    }
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        // Retail sends a single-slot UpdateInventorySlot (0x0123) for the changed item.
+        let updated = self
+            .player_data
+            .inventory
+            .get_item(retrieval.container, retrieval.slot)
+            .unwrap_or_default();
+        let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateInventorySlot(ItemInfo {
+            sequence: self.player_data.item_sequence,
+            container: retrieval.container,
+            slot: retrieval.slot,
+            ..updated.into()
+        }));
+        self.send_ipc_self(ipc).await;
+        self.player_data.item_sequence += 1;
+
+        if returned_to_inventory {
+            // 0xFFFFFFFF is what retail sends here; action type 6 is the materia operation.
+            self.send_inventory_ack(u32::MAX, 6).await;
+            self.send_inventory().await;
+        }
+
+        self.send_stats().await;
+        self.actor_control_self(ActorControlCategory::GearSetRefresh {})
+            .await;
+
+        let actor_id = self.player_data.character.actor_id;
+
+        // A recovered materia gets the celebratory animation; a shattered one does not.
+        if returned_to_inventory {
+            self.actor_control(actor_id, ActorControlCategory::PlayEmoteTimeline {
+                timeline_id: RETRIEVAL_SUCCESS_TIMELINE,
+            })
+            .await;
+        }
+
+        self.actor_control(actor_id, ActorControlCategory::PlayVFX {
+            source_actor_id: actor_id.0,
+            target_actor_id: actor_id.0,
+            unk1: 0,
+            vfx_id: if returned_to_inventory {
+                RETRIEVAL_SUCCESS_VFX
+            } else {
+                RETRIEVAL_FAILURE_VFX
+            },
+        })
+        .await;
+
+        // Two lines, in this order: the retrieval itself, then what became of the materia.
+        self.actor_control_self(ActorControlCategory::LogMessage {
+            log_message: RETRIEVAL_STARTED_LOG_MESSAGE,
+            // Raw id on purpose: the client renders the HQ marker itself from the +1_000_000
+            // offset, and stripping it makes the item print twice, once NQ and once HQ.
+            param1: retrieval.item_id_hq,
+            param2: 0,
+            param3: 0,
+            param4: 0,
+            param5: 0,
+        })
+        .await;
+
+        self.actor_control_self(ActorControlCategory::LogMessage {
+            log_message: if returned_to_inventory {
+                RETRIEVAL_RECOVERED_LOG_MESSAGE
+            } else {
+                RETRIEVAL_SHATTERED_LOG_MESSAGE
+            },
+            param1: materia_item_id.unwrap_or(0),
+            param2: 0,
+            param3: 0,
+            param4: 0,
+            param5: 0,
+        })
+        .await;
+
+        // TODO: retail also sends an unmodelled 56-byte packet (opcode 267) just before this,
+        // carrying the same (result, item, materia) triple. Its framing isn't fully decoded yet and
+        // EventResume4 already conveys the outcome, so it is skipped.
+        self.resume_event(
+            retrieval.handler_id,
+            0,
+            1,
+            vec![
+                u32::from(returned_to_inventory),
+                retrieval.item_id_hq,
+                materia_item_id.unwrap_or(0),
+            ],
+        )
+        .await;
+
+        // NOTE: retail also sends StatusEffectList here. We don't, for the same reason the meld and
+        // dye paths don't: there is no ZoneConnection method for it (it originates in the combat
+        // server), and those flows work fine without it.
+        self.update_class_info().await;
+
+        self.send_conditions().await; // So the client gets unstuck.
     }
 
     pub async fn send_inventory_ack(&mut self, sequence: u32, action_type: u16) {
@@ -898,5 +1092,27 @@ impl ZoneConnection {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retrieval_target_slot;
+
+    #[test]
+    fn retrieval_takes_the_last_melded_materia_only() {
+        // The captures prove this: an item holding [17, 16] became [17] after a retrieval, not [].
+        assert_eq!(retrieval_target_slot(&[17, 16, 0, 0, 0]), Some(1));
+        // A single materia comes out of slot 0.
+        assert_eq!(retrieval_target_slot(&[15, 0, 0, 0, 0]), Some(0));
+        // A fully melded item gives up its overmeld slot first.
+        assert_eq!(retrieval_target_slot(&[15, 15, 24, 24, 24]), Some(4));
+    }
+
+    #[test]
+    fn retrieval_refuses_an_item_with_no_materia() {
+        // Nothing to take -- the caller must not open the event, or the client sits in the
+        // retrieval condition forever.
+        assert_eq!(retrieval_target_slot(&[0, 0, 0, 0, 0]), None);
     }
 }

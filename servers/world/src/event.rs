@@ -11,7 +11,8 @@ use kawari::{
 use crate::{
     CraftingEventHandler, FishingEventHandler, GameData, GatheringEventHandler,
     GimmickAccessorEventHandler, InclusionShopEventHandler, InstanceContentEventHandler,
-    LuaEventHandler, ShopEventHandler, SpecialShopEventHandler, ZoneConnection,
+    LuaEventHandler, MateriaRetrievalEventHandler, ShopEventHandler, SpecialShopEventHandler,
+    ZoneConnection,
 };
 
 use super::lua::LuaPlayer;
@@ -209,6 +210,7 @@ pub fn dispatch_event(
         HandlerType::SpecialShop => Some(Box::new(SpecialShopEventHandler::new())),
         HandlerType::HousingAethernet => generic_lua_event("events/generic/HousingAethernet.lua"),
         HandlerType::InstanceContent => Some(Box::new(InstanceContentEventHandler::new())),
+        HandlerType::Materialize => Some(Box::new(MateriaRetrievalEventHandler::new())),
         _ => None,
     }
 }
