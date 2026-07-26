@@ -34,6 +34,8 @@ use icarus::InstanceContent::InstanceContentSheet;
 use icarus::Item::ItemSheet;
 use icarus::ItemAction::ItemActionSheet;
 use icarus::ItemLevel::{ItemLevelRow, ItemLevelSheet};
+use icarus::Materia::MateriaSheet;
+use icarus::MateriaGrade::MateriaGradeSheet;
 use icarus::Mount::MountSheet;
 use icarus::NpcEquip::NpcEquipSheet;
 use icarus::NpcYell::NpcYellSheet;
@@ -89,6 +91,8 @@ pub struct GameData {
     pub item_level_sheet: ItemLevelSheet,
     pub gimmick_rect_sheet: GimmickRectSheet,
     pub base_param_sheet: BaseParamSheet,
+    pub materia_sheet: MateriaSheet,
+    pub materia_grade_sheet: MateriaGradeSheet,
     pub classjob_sheet: ClassJobSheet,
     pub battalion_sheet: BattalionSheet,
     pub enpc_base_sheet: ENpcBaseSheet,
@@ -157,6 +161,17 @@ pub struct ItemRow {
     pub weapon_damage_phys: u16,
     /// Weapon magic damage (the weapon's base damage, used by caster jobs).
     pub weapon_damage_mag: u16,
+    /// Number of built-in materia slots (not counting overmeld slots).
+    pub materia_slot_count: u8,
+    /// Whether advanced melding (overmelding) is permitted on this item.
+    pub is_advanced_melding_permitted: bool,
+    /// Whether this item has a high-quality version at all. Items with this unset can never be HQ,
+    /// so an HQ request for them must fall back to normal quality.
+    pub can_be_hq: bool,
+    /// When this item *is* a materia, its own `(Materia` row id, grade index)`. A materia carries
+    /// this in its `materia[0]`/`materia_grades[0]` fields, which is how the client knows its grade
+    /// -- and therefore which overmeld success rate to show. `None` for everything else.
+    pub materia_identity: Option<(u16, u8)>,
 }
 
 #[derive(Debug)]
@@ -563,6 +578,11 @@ impl GameData {
                 .ok()
                 .unwrap();
 
+        let materia_sheet =
+            MateriaSheet::read_from(&mut resource_resolver, Language::None).unwrap();
+        let materia_grade_sheet =
+            MateriaGradeSheet::read_from(&mut resource_resolver, Language::None).unwrap();
+
         let battalion_sheet = BattalionSheet::read_from(&mut resource_resolver, Language::None)
             .ok()
             .unwrap();
@@ -620,6 +640,8 @@ impl GameData {
             item_level_sheet,
             gimmick_rect_sheet,
             base_param_sheet,
+            materia_sheet,
+            materia_grade_sheet,
             classjob_sheet,
             battalion_sheet,
             enpc_base_sheet,
@@ -697,6 +719,10 @@ impl GameData {
                 magic_defense: matched_row.DefenseMag,
                 weapon_damage_phys: matched_row.DamagePhys,
                 weapon_damage_mag: matched_row.DamageMag,
+                materia_slot_count: matched_row.MateriaSlotCount,
+                is_advanced_melding_permitted: matched_row.IsAdvancedMeldingPermitted,
+                can_be_hq: matched_row.CanBeHq,
+                materia_identity: self.get_materia_for_item(item_id),
                 equip_restrictions: self
                     .get_equipslot_restrictions(matched_row.EquipSlotCategory)
                     .unwrap(),
@@ -706,6 +732,68 @@ impl GameData {
         }
 
         None
+    }
+
+    /// Returns `(materia_row_id, grade_index)` for the given materia item_id.
+    /// `grade_index` is the 0-based index into `Materia.Item[]` / `Materia.Value[]`.
+    pub fn get_materia_for_item(&self, item_id: u32) -> Option<(u16, u8)> {
+        if item_id == 0 {
+            return None;
+        }
+        for (row_id, subrows) in &self.materia_sheet {
+            for (_subrow_id, row) in &subrows {
+                for (k, &slot_item_id) in row.Item.iter().enumerate() {
+                    if slot_item_id as u32 == item_id {
+                        return Some((row_id as u16, k as u8));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the overmeld success rate, as a percentage, for melding a materia of `grade_index`
+    /// into overmeld slot `overmeld_index` (0-based, counted past the item's built-in slots).
+    ///
+    /// `target_is_hq` selects the NQ or HQ column, and refers to the **target item's** quality --
+    /// materia themselves can never be HQ (`Item.CanBeHq` is false for them).
+    ///
+    /// A returned `0` means the meld is **forbidden**, not merely unlikely: the higher even grades
+    /// (陆/捌/拾/拾贰, i.e. `grade_index` 5/7/9/11) are `[12, 0, 0, 0]`, so they may only ever occupy
+    /// the first overmeld slot. `None` means the grade or slot index is out of range.
+    pub fn get_overmeld_rate(
+        &self,
+        grade_index: u8,
+        overmeld_index: usize,
+        target_is_hq: bool,
+    ) -> Option<u8> {
+        let row = self.materia_grade_sheet.row(grade_index as u32)?;
+        let percents = if target_is_hq {
+            row.OvermeldHQPercent
+        } else {
+            row.OvermeldNQPercent
+        };
+        percents.get(overmeld_index).copied()
+    }
+
+    /// The chance, as a percentage, that retrieving (拆) a materia of `grade_index` returns it to
+    /// the player's inventory instead of destroying it.
+    ///
+    /// Grades 0-9 are 100%, 拾壹型 (index 10) is 80% and 拾贰型 (index 11) is 40% -- retrieval is
+    /// only actually risky for the top two grades.
+    pub fn get_materia_return_rate(&self, grade_index: u8) -> Option<u8> {
+        let row = self.materia_grade_sheet.row(grade_index as u32)?;
+        Some(row.ReturnRate)
+    }
+
+    /// The catalog item id of the materia identified by `(Materia` row, grade index)`.
+    ///
+    /// This is the inverse of [`Self::get_materia_for_item`], used when a retrieved materia has to
+    /// be handed back to the player as an inventory item.
+    pub fn get_materia_item_id(&self, materia_row: u16, grade_index: u8) -> Option<u32> {
+        let row = self.materia_sheet.row(materia_row as u32)?;
+        let item_id = *row.Item.get(grade_index as usize)?;
+        (item_id > 0).then_some(item_id as u32)
     }
 
     /// Gets the primary model ID for a given item ID.

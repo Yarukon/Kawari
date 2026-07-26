@@ -11,7 +11,7 @@ use kawari::common::{
     PlayerStateFlags3, Position, calculate_max_level,
 };
 use kawari::config::{FilesystemConfig, get_config};
-use kawari_world::inventory::{Item, MAX_LARGE_STORAGE};
+use kawari_world::inventory::{Item, MAX_LARGE_STORAGE, item_id_base};
 use physis::{TerritoryIntendedUse, equipment::EquipSlot};
 
 use kawari::ipc::chat::ClientChatIpcData;
@@ -26,7 +26,7 @@ use kawari::ipc::zone::{
 
 use kawari::ipc::zone::{
     Blacklist, BlacklistedCharacter, ClientTriggerCommand, ClientZoneIpcData, ClientZoneIpcSegment,
-    ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment,
+    MeldMateriaRequest, ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment,
 };
 
 use kawari::common::{CharacterMode, NETWORK_TIMEOUT, RECEIVE_BUFFER_SIZE};
@@ -38,8 +38,8 @@ use kawari::packet::{
 };
 use kawari_world::lua::{KawariLua, KawariLuaState, LuaPlayer};
 use kawari_world::{
-    ChatConnection, CustomIpcConnection, Event, EventHandler, GameData, ObsfucationData,
-    PetCommand, Roulette, TeleportReason, ZoneConnection,
+    ChatConnection, CustomIpcConnection, Event, EventHandler, GameData, MateriaRetrieval,
+    MeldSession, ObsfucationData, PetCommand, Roulette, TeleportReason, ZoneConnection,
 };
 use kawari_world::{
     ChatConnectionChannels, ChatPlayerData, ClientHandle, ClientId, FromServer, MessageInfo,
@@ -200,6 +200,9 @@ async fn initial_setup(
                     is_trading: false,
                     director_vars: None,
                     dyeing_information: None,
+                    meld_session: None,
+                    materia_retrieval: None,
+                    deferred_tasks: Vec::new(),
                     friend_enrich_pending: false,
                     friend_enrich_sequence: 0,
                     friend_enrich_pairs: Vec::new(),
@@ -1171,6 +1174,351 @@ async fn send_zone_init_response(connection: &mut ZoneConnection, source: &'stat
     true
 }
 
+
+/// Whether `slot` is addressable in `container`. The `Storage` accessors `unwrap()`/`panic!()` on
+/// an out-of-range index, so any client-supplied slot must pass through here first.
+fn slot_in_bounds(connection: &ZoneConnection, container: ContainerType, slot: u16) -> bool {
+    connection
+        .player_data
+        .inventory
+        .get_container(container)
+        .is_some_and(|container| (slot as u32) < container.max_slots())
+}
+
+/// Sends a single-slot `UpdateInventorySlot` for the item currently in `container`/`slot`.
+async fn send_updated_inventory_slot(
+    connection: &mut ZoneConnection,
+    container: ContainerType,
+    slot: u16,
+) {
+    let item = connection
+        .player_data
+        .inventory
+        .get_item(container, slot)
+        .unwrap_or_default();
+
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::UpdateInventorySlot(ItemInfo {
+        sequence: connection.player_data.item_sequence,
+        container,
+        slot,
+        ..item.into()
+    }));
+    connection.send_ipc_self(ipc).await;
+    connection.player_data.item_sequence += 1;
+}
+
+/// Decides which materia slot a meld lands in, or `None` if the item cannot accept another one.
+///
+/// A meld fills the lowest free slot. Slots at or past `materia_slot_count` are overmeld
+/// (禁断) slots, which only items flagged `IsAdvancedMeldingPermitted` may use.
+fn meld_target_slot(
+    materia: &[u16; 5],
+    materia_slot_count: u8,
+    is_advanced_melding_permitted: bool,
+) -> Option<usize> {
+    // An item with no normal slots is not meldable at all, and the advanced-melding flag does not
+    // change that -- overmelding extends an item's existing slots, it does not grant a first one.
+    // This is load-bearing: materia items themselves carry `MateriaSlotCount = 0` together with
+    // `IsAdvancedMeldingPermitted = true`, so without this check a request aimed at a materia
+    // would pass validation and meld a materia into a materia.
+    if materia_slot_count == 0 {
+        return None;
+    }
+
+    let first_empty = materia.iter().position(|&row| row == 0)?;
+
+    if first_empty >= materia_slot_count as usize && !is_advanced_melding_permitted {
+        return None;
+    }
+
+    Some(first_empty)
+}
+
+/// Refuses a meld attempt, answering the client so its meld UI resolves.
+///
+/// Every rejection still has to reply: the client waits on ActorControl 351 after sending opcode
+/// 812 and hangs if nothing comes back. The attempt is counted as a failure so the session summary
+/// sent on ClientTrigger 408 reports 348 (failed) rather than a stale 347 (ok) left behind by an
+/// earlier successful attempt in the same session.
+async fn refuse_meld_attempt(
+    connection: &mut ZoneConnection,
+    req: &MeldMateriaRequest,
+    reason: &str,
+) {
+    tracing::warn!("MeldMateriaRequest refused: {reason}");
+
+    let failed_count = if let Some(session) = connection.meld_session.as_mut() {
+        session.failed_count += 1;
+        session.succeeded = false;
+        session.failed_count
+    } else {
+        // No session (the client skipped CT 407); still answer for this one attempt.
+        1
+    };
+
+    let actor_id = connection.player_data.character.actor_id;
+    connection
+        .actor_control(
+            actor_id,
+            ActorControlCategory::MeldAttemptResult {
+                repeat_echo: req.repeat as u32,
+                failed_count,
+            },
+        )
+        .await;
+}
+
+/// For a meld landing in `slot`, returns which overmeld (禁断) slot that is -- 0-based, counted past
+/// the item's built-in slots -- or `None` when the meld lands in a normal built-in slot.
+///
+/// Overmeld slots are rate-limited per materia grade, and a 0% rate means forbidden, so the caller
+/// needs this index to look the rate up. Normal slots are never rate-limited.
+fn overmeld_slot_index(slot: usize, materia_slot_count: u8) -> Option<usize> {
+    slot.checked_sub(materia_slot_count as usize)
+}
+
+/// Handles the self-meld request (client opcode 812): melds one materia from the source slot onto
+/// the item in the destination slot.
+///
+/// Melds into an item's built-in slots always succeed. Overmeld (禁断) slots roll against
+/// `MateriaGrade`, where a 0% rate means the slot is forbidden to that grade outright.
+///
+/// With `repeat` set (一气呵成) the whole run happens server-side inside this one request: retail
+/// answers a nine-materia run with a single response burst, so the loop keeps consuming from the
+/// source stack until it succeeds or the stack runs dry, and only then reports.
+async fn handle_meld_materia_request(connection: &mut ZoneConnection, req: &MeldMateriaRequest) {
+    // Both indices are client-controlled and the storage accessors panic on an out-of-range
+    // index, so validate them before touching the inventory.
+    if !slot_in_bounds(connection, req.src_container, req.src_slot)
+        || !slot_in_bounds(connection, req.dst_container, req.dst_slot)
+    {
+        refuse_meld_attempt(
+            connection,
+            req,
+            &format!(
+                "out-of-range container/slot (src {:?}/{}, dst {:?}/{})",
+                req.src_container, req.src_slot, req.dst_container, req.dst_slot
+            ),
+        )
+        .await;
+        return;
+    }
+
+    // Melding a slot onto itself would consume and rewrite the same item.
+    if req.src_container == req.dst_container && req.src_slot == req.dst_slot {
+        refuse_meld_attempt(
+            connection,
+            req,
+            &format!(
+                "source and destination are the same slot ({:?}/{})",
+                req.src_container, req.src_slot
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let (Some(materia_item), Some(target_item)) = (
+        connection
+            .player_data
+            .inventory
+            .get_item(req.src_container, req.src_slot),
+        connection
+            .player_data
+            .inventory
+            .get_item(req.dst_container, req.dst_slot),
+    ) else {
+        refuse_meld_attempt(connection, req, "unreadable source or destination slot").await;
+        return;
+    };
+
+    if materia_item.is_empty_slot() || target_item.is_empty_slot() {
+        refuse_meld_attempt(connection, req, "source or destination slot is empty").await;
+        return;
+    }
+
+    // Only equippable gear can carry materia. This rules out the whole class of non-gear
+    // destinations (materia, consumables, crafting mats) that a crafted packet could name.
+    if target_item.equip_slot_category == 0 {
+        refuse_meld_attempt(
+            connection,
+            req,
+            &format!(
+                "destination item {} is not equippable gear",
+                target_item.item_id
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let materia_item_id = item_id_base(materia_item.item_id);
+
+    // Resolve the materia's sheet row and grade index. `materia[i]` on the wire is a Materia row
+    // id and `materia_grades[i]` is the 0-based index into that row's Item[]/Value[] arrays.
+    let materia_lookup = {
+        let game_data = connection.gamedata.lock();
+        game_data.get_materia_for_item(materia_item_id)
+    };
+    let Some((materia_row, grade_index)) = materia_lookup else {
+        refuse_meld_attempt(
+            connection,
+            req,
+            &format!("source item {materia_item_id} is not a materia"),
+        )
+        .await;
+        return;
+    };
+
+    // Pick the slot to fill: the lowest free one, subject to the overmeld rules.
+    let Some(first_empty) = meld_target_slot(
+        &target_item.materia,
+        target_item.materia_slot_count,
+        target_item.is_advanced_melding_permitted,
+    ) else {
+        refuse_meld_attempt(
+            connection,
+            req,
+            &format!(
+                "item {} cannot accept another materia ({} slots, overmeld {})",
+                target_item.item_id,
+                target_item.materia_slot_count,
+                target_item.is_advanced_melding_permitted
+            ),
+        )
+        .await;
+        return;
+    };
+
+    // Overmeld slots are rate-limited per materia grade; normal built-in slots always succeed.
+    // A 0% rate means the meld is forbidden outright, not merely unlikely -- the higher even grades
+    // (陆/捌/拾/拾贰) are `[12, 0, 0, 0]`, so they may only ever occupy the first overmeld slot.
+    let overmeld_index = overmeld_slot_index(first_empty, target_item.materia_slot_count);
+    let success_rate = match overmeld_index {
+        None => 100,
+        Some(overmeld_index) => {
+            let target_is_hq = target_item.item_flags & 1 != 0;
+            let rate = {
+                let game_data = connection.gamedata.lock();
+                game_data.get_overmeld_rate(grade_index, overmeld_index, target_is_hq)
+            };
+            let Some(rate) = rate else {
+                refuse_meld_attempt(
+                    connection,
+                    req,
+                    &format!(
+                        "no overmeld rate for grade index {grade_index} in overmeld slot {overmeld_index}"
+                    ),
+                )
+                .await;
+                return;
+            };
+            if rate == 0 {
+                refuse_meld_attempt(
+                    connection,
+                    req,
+                    &format!(
+                        "grade index {grade_index} may not be melded into overmeld slot {overmeld_index} (0% rate)"
+                    ),
+                )
+                .await;
+                return;
+            }
+            rate
+        }
+    };
+
+    // Run the attempts. Without `repeat` this is a single roll; with it (一气呵成) retail burns
+    // through the stack inside this one request until something lands, so loop here rather than
+    // waiting for the client to re-send. The target slot never moves: a failure consumes the
+    // materia without filling anything.
+    let mut succeeded = false;
+    let mut attempt_failed_count = 0u32;
+
+    loop {
+        // Consume one materia from the stack, emptying the slot if that was the last one.
+        let mut stack_exhausted = true;
+        if let Some(source) = connection
+            .player_data
+            .inventory
+            .get_item_mut(req.src_container, req.src_slot)
+        {
+            let remaining = source.quantity.saturating_sub(1);
+            if remaining == 0 {
+                *source = Item::default();
+            } else {
+                source.quantity = remaining;
+                stack_exhausted = false;
+            }
+        }
+
+        // `fastrand::u8(0..100)` yields 0..=99, so `< rate` is exactly `rate` chances in a hundred.
+        if success_rate >= 100 || fastrand::u8(0..100) < success_rate {
+            succeeded = true;
+            if let Some(target) = connection
+                .player_data
+                .inventory
+                .get_item_mut(req.dst_container, req.dst_slot)
+            {
+                target.materia[first_empty] = materia_row;
+                target.materia_grades[first_empty] = grade_index;
+            }
+            break;
+        }
+
+        attempt_failed_count += 1;
+
+        if req.repeat == 0 || stack_exhausted {
+            break;
+        }
+    }
+
+    // Record the outcome so the ActorControl 347/348 summary sent on ClientTrigger 408 can report
+    // it. A meld can legitimately arrive without a session if the client skipped CT 407.
+    //
+    // The count accumulates across the session rather than being overwritten: earlier failures
+    // still count once a later attempt succeeds, which is what retail reports (a repeat run that
+    // succeeded on its 9th materia sends ActorControl 351 = [1, 8]).
+    let failed_count = if let Some(session) = connection.meld_session.as_mut() {
+        session.last_materia_item_id = materia_item_id;
+        session.failed_count += attempt_failed_count;
+        session.succeeded = succeeded;
+        session.failed_count
+    } else {
+        attempt_failed_count
+    };
+
+    // ActorControl 351 precedes the inventory updates in every capture -- the client appears to
+    // use it to prime its UI before the item refresh lands, so keep that order.
+    let actor_id = connection.player_data.character.actor_id;
+    connection
+        .actor_control(
+            actor_id,
+            ActorControlCategory::MeldAttemptResult {
+                repeat_echo: req.repeat as u32,
+                failed_count,
+            },
+        )
+        .await;
+
+    send_updated_inventory_slot(connection, req.src_container, req.src_slot).await;
+
+    // On failure retail sends no update for the target item; that absence is the client's main
+    // success/failure discriminator, so only send it (and the stat burst) when the meld landed.
+    if succeeded {
+        send_updated_inventory_slot(connection, req.dst_container, req.dst_slot).await;
+        connection.send_stats().await;
+        connection
+            .actor_control_self(ActorControlCategory::GearSetRefresh {})
+            .await;
+        connection.update_class_info().await;
+    }
+
+    // No LogMessage here on purpose: the client prints the meld result itself once the inventory
+    // updates land. Sending LogMessage 1201/1202 as well produced two identical chat lines, one
+    // rendered NQ and one HQ.
+}
+
 /// Process packets from the client. Returns false if we want to kill the connection.
 async fn process_packet(
     connection: &mut ZoneConnection,
@@ -1668,6 +2016,131 @@ async fn process_packet(
                             ClientTriggerCommand::PrepareRemoveGlamour { .. } => {
                                 // Ditto.
                                 connection.glamour_information = Some(trigger.trigger.clone());
+                            }
+                            ClientTriggerCommand::EnterMateriaAttachingState { item_id } => {
+                                // Remember the target item for the AC 347/348 summary sent later,
+                                // then acknowledge the session opening.
+                                connection.meld_session = Some(MeldSession {
+                                    item_id_hq: item_id,
+                                    last_materia_item_id: 0,
+                                    failed_count: 0,
+                                    succeeded: false,
+                                });
+
+                                let actor_id = connection.player_data.character.actor_id;
+                                connection
+                                    .actor_control(
+                                        actor_id,
+                                        ActorControlCategory::MeldSessionOpened {},
+                                    )
+                                    .await;
+                            }
+                            ClientTriggerCommand::FinishedMateriaAttaching {} => {
+                                // Summarise the session. The client expects the target item id it
+                                // sent in CT 407 echoed back here.
+                                if let Some(session) = connection.meld_session.take() {
+                                    let actor_id = connection.player_data.character.actor_id;
+                                    let category = if session.succeeded {
+                                        ActorControlCategory::MeldSessionOk {
+                                            item_id_hq: session.item_id_hq,
+                                            materia_item_id: session.last_materia_item_id,
+                                            failed_count: session.failed_count,
+                                            unk: 0,
+                                        }
+                                    } else {
+                                        ActorControlCategory::MeldSessionFailed {
+                                            item_id_hq: session.item_id_hq,
+                                            materia_item_id: session.last_materia_item_id,
+                                            failed_count: session.failed_count,
+                                            unk: 0,
+                                        }
+                                    };
+                                    connection.actor_control(actor_id, category).await;
+                                }
+                            }
+                            ClientTriggerCommand::ExitMateriaAttachingState {} => {
+                                // Teardown. This trigger is optional -- the client only sends it
+                                // sometimes -- so nothing may depend on it having arrived.
+                                connection.meld_session = None;
+
+                                // Retail sends ActorControlSelf 358 (purpose still unidentified,
+                                // no params in any capture) before the session-closed ack.
+                                connection
+                                    .actor_control_self(ActorControlCategory::Unknown {
+                                        category: 358,
+                                        param1: 0,
+                                        param2: 0,
+                                        param3: 0,
+                                        param4: 0,
+                                        param5: 0,
+                                    })
+                                    .await;
+
+                                let actor_id = connection.player_data.character.actor_id;
+                                connection
+                                    .actor_control(
+                                        actor_id,
+                                        ActorControlCategory::MeldSessionClosed {},
+                                    )
+                                    .await;
+                            }
+                            ClientTriggerCommand::RequestMateriaRetrieval {
+                                handler_id,
+                                container,
+                                container_index,
+                                item_id_hq,
+                                ..
+                            } => {
+                                // The slot is client-controlled and the storage accessors panic on
+                                // an out-of-range index, so validate before touching anything.
+                                let slot = container_index as u16;
+                                let has_materia = slot_in_bounds(connection, container, slot)
+                                    && connection
+                                        .player_data
+                                        .inventory
+                                        .get_item(container, slot)
+                                        .is_some_and(|item| {
+                                            !item.is_empty_slot()
+                                                && item.materia.iter().any(|&row| row != 0)
+                                        });
+
+                                if has_materia {
+                                    connection.materia_retrieval = Some(MateriaRetrieval {
+                                        handler_id,
+                                        container,
+                                        slot,
+                                        item_id_hq,
+                                    });
+
+                                    connection
+                                        .start_event(
+                                            ObjectTypeId {
+                                                object_id: connection
+                                                    .player_data
+                                                    .character
+                                                    .actor_id,
+                                                object_type: ObjectTypeKind::None,
+                                            },
+                                            handler_id,
+                                            EventType::MateriaRetrieval,
+                                            0,
+                                            events,
+                                            lua_player,
+                                        )
+                                        .await;
+
+                                    let event = &events.last().unwrap().1;
+
+                                    connection
+                                        .event_scene(event, 0, SceneFlags::from_bits_retain(0x00040000), vec![])
+                                        .await;
+                                } else {
+                                    // Nothing to retrieve. Don't open the event at all -- opening it
+                                    // would set the condition and leave the client stuck in it.
+                                    tracing::warn!(
+                                        "RequestMateriaRetrieval: {container:?}/{slot} holds no materia; ignoring."
+                                    );
+                                }
                             }
                             ClientTriggerCommand::Fishing { action, .. } => {
                                 let handler_id = HandlerId::new(HandlerType::Fishing, 1).0;
@@ -2770,6 +3243,10 @@ async fn process_packet(
                     ClientZoneIpcData::DyeInformation(dye_item) => {
                         tracing::info!("Client is preparing to dye an item: {dye_item:#?}");
                         connection.dyeing_information = Some(dye_item.clone());
+                    }
+                    ClientZoneIpcData::MeldMateriaRequest(req) => {
+                        tracing::info!("Client requested a materia meld: {req:#?}");
+                        handle_meld_materia_request(connection, req).await;
                     }
                     ClientZoneIpcData::SaveGlamourPlate(save) => {
                         connection.player_data.glamour.save_plate(
@@ -5151,7 +5628,16 @@ async fn client_loop(
     }
 
     loop {
+        // Wake up exactly when the next deferred task is due. With nothing queued this is a long
+        // idle sleep that never fires in practice, since the other branches win the race.
+        let task_delay = connection
+            .next_task_delay()
+            .unwrap_or(std::time::Duration::from_secs(3600));
+
         tokio::select! {
+            _ = tokio::time::sleep(task_delay) => {
+                connection.run_due_tasks().await;
+            },
             msg = internal_recv.recv() => match msg {
                 Some(msg) => {
                     process_server_msg(&mut connection, &mut lua_player, &mut events, client_handle.clone(), Some(msg)).await;
@@ -5300,5 +5786,107 @@ async fn async_main() {
                 handle.clone(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hq_flag_is_stripped_from_wire_item_ids() {
+        // The client sends HQ items as real_id + 1_000_000 (e.g. CT 407's 1049251 = 49251).
+        assert_eq!(item_id_base(1_049_251), 49251);
+        // An NQ id passes through untouched.
+        assert_eq!(item_id_base(49251), 49251);
+        assert_eq!(item_id_base(0), 0);
+    }
+
+    #[test]
+    fn meld_fills_the_lowest_free_normal_slot() {
+        assert_eq!(meld_target_slot(&[0, 0, 0, 0, 0], 2, false), Some(0));
+        assert_eq!(meld_target_slot(&[15, 0, 0, 0, 0], 2, false), Some(1));
+    }
+
+    #[test]
+    fn meld_is_refused_once_the_normal_slots_are_full_without_overmeld() {
+        // Both built-in slots taken, and the item does not permit advanced melding.
+        assert_eq!(meld_target_slot(&[15, 15, 0, 0, 0], 2, false), None);
+    }
+
+    #[test]
+    fn overmeld_reaches_past_the_built_in_slots_when_permitted() {
+        // Same item state, but advanced melding is allowed: the meld spills into slot 2.
+        assert_eq!(meld_target_slot(&[15, 15, 0, 0, 0], 2, true), Some(2));
+    }
+
+    #[test]
+    fn a_fully_melded_item_is_refused_even_with_overmeld() {
+        // All five slots occupied: there is nowhere left to go regardless of the flag.
+        assert_eq!(meld_target_slot(&[15, 15, 24, 24, 24], 2, true), None);
+        assert_eq!(meld_target_slot(&[15, 15, 24, 24, 24], 5, true), None);
+    }
+
+    #[test]
+    fn an_item_with_no_materia_slots_can_never_be_melded() {
+        // MateriaSlotCount 0 means the item is not meldable at all. The advanced-melding flag must
+        // not create a first slot -- overmelding only extends slots an item already has.
+        assert_eq!(meld_target_slot(&[0, 0, 0, 0, 0], 0, false), None);
+        assert_eq!(meld_target_slot(&[0, 0, 0, 0, 0], 0, true), None);
+    }
+
+    #[test]
+    fn overmeld_slot_index_distinguishes_built_in_slots_from_overmeld_ones() {
+        // Built-in slots are not rate-limited, so they must report `None`.
+        assert_eq!(overmeld_slot_index(0, 2), None);
+        assert_eq!(overmeld_slot_index(1, 2), None);
+        // The first slot past the built-in ones is overmeld index 0 -- the only one the higher even
+        // grades (陆/捌/拾/拾贰) are allowed to use.
+        assert_eq!(overmeld_slot_index(2, 2), Some(0));
+        assert_eq!(overmeld_slot_index(3, 2), Some(1));
+        assert_eq!(overmeld_slot_index(4, 2), Some(2));
+        // An item with five built-in slots has no overmeld slots at all.
+        assert_eq!(overmeld_slot_index(4, 5), None);
+        // A single built-in slot leaves four overmeld slots, matching the 4-wide rate arrays.
+        assert_eq!(overmeld_slot_index(1, 1), Some(0));
+        assert_eq!(overmeld_slot_index(4, 1), Some(3));
+    }
+
+    #[test]
+    fn a_materia_is_not_itself_a_valid_meld_destination() {
+        // Real sheet values for materia item 41772 (武略魔晶石拾贰型), verified against the Item
+        // sheet: MateriaSlotCount = 0 with IsAdvancedMeldingPermitted = true. That combination
+        // previously satisfied the overmeld guard by short-circuiting on the flag, which let a
+        // crafted request meld a materia into a materia and persist corrupt inventory.
+        assert_eq!(meld_target_slot(&[0, 0, 0, 0, 0], 0, true), None);
+        // Materia in inventory also carry their own identity in materia[0]; still not a target.
+        assert_eq!(meld_target_slot(&[24, 0, 0, 0, 0], 0, true), None);
+    }
+
+    #[test]
+    fn a_materia_carries_its_own_identity_so_the_client_can_read_its_grade() {
+        // Regression: a materia with an empty identity reads as grade 0 (壹型) client-side, and the
+        // client then displays *that* grade's overmeld rate -- 90% in the first overmeld slot,
+        // instead of the 12%/17% a 拾贰型 actually has. Nothing server-side notices, because the
+        // server never consults these fields for a source materia; the damage is display-only but
+        // completely misleading.
+        let row = kawari_world::ItemRow {
+            id: 41772,
+            materia_identity: Some((15, 11)),
+            ..Default::default()
+        };
+        let item = Item::new(&row, 1);
+        assert_eq!(item.materia[0], 15);
+        assert_eq!(item.materia_grades[0], 11);
+
+        // Non-materia items must stay untouched, or fresh gear would look pre-melded.
+        let sword = kawari_world::ItemRow {
+            id: 1601,
+            materia_identity: None,
+            ..Default::default()
+        };
+        let sword = Item::new(&sword, 1);
+        assert_eq!(sword.materia, [0; 5]);
+        assert_eq!(sword.materia_grades, [0; 5]);
     }
 }

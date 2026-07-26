@@ -238,4 +238,5 @@ pub enum LuaTask {
         name: String,
     },
     FinishDyeing {},
+    FinishMateriaRetrieval {},
 }

@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use parking_lot::Mutex;
@@ -16,7 +16,7 @@ use crate::{
     lua::{KawariLua, LuaTask},
 };
 use kawari::{
-    common::{HandlerId, ObjectId, Position, timestamp_secs},
+    common::{ContainerType, HandlerId, ObjectId, Position, timestamp_secs},
     config::WorldConfig,
     ipc::zone::{
         ApartmentList, ApartmentListEntry, CWLSMemberListEntry, ClientTriggerCommand,
@@ -69,6 +69,51 @@ pub(crate) fn effective_level(synced_level: Option<u8>, true_level: u8) -> u8 {
 #[derive(Debug, Default, Clone)]
 pub struct TeleportQuery {
     pub aetheryte_id: u16,
+}
+
+/// State for an in-progress materia attach session (self-meld, ClientTrigger 407-409).
+#[derive(Debug, Clone)]
+pub struct MeldSession {
+    /// HQ-flagged item id from ClientTrigger 407 (real id + 1_000_000 when HQ).
+    pub item_id_hq: u32,
+    /// Item id of the last materia used in this session.
+    pub last_materia_item_id: u32,
+    /// Number of failed attempts so far.
+    pub failed_count: u32,
+    /// Whether the last attempt succeeded.
+    pub succeeded: bool,
+}
+
+/// Work the server has to do at a specific time rather than immediately.
+///
+/// Some flows are paced by the server, not the client: retail delays the materia retrieval result
+/// by roughly the retrieval animation's length, and sending it early makes the client cut its own
+/// animation short. The connection loop drains these once they come due.
+#[derive(Debug, Clone)]
+pub enum DeferredTask {
+    /// Apply a materia retrieval and send its result burst.
+    FinishMateriaRetrieval,
+}
+
+/// A [`DeferredTask`] together with the time it should run.
+#[derive(Debug, Clone)]
+pub struct ScheduledTask {
+    pub run_at: Instant,
+    pub task: DeferredTask,
+}
+
+/// State for an in-progress materia retrieval (拆), opened by ClientTrigger 2800 and carried out
+/// when the client casts the retrieval action inside the resulting event.
+#[derive(Debug, Clone)]
+pub struct MateriaRetrieval {
+    /// The `Materialize` handler id the event was opened with, echoed back in the resume.
+    pub handler_id: u32,
+    /// Container holding the item to retrieve from.
+    pub container: ContainerType,
+    /// Slot of that item within `container`.
+    pub slot: u16,
+    /// HQ-flagged item id as the client sent it, echoed back in the resume.
+    pub item_id_hq: u32,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -231,6 +276,12 @@ pub struct ZoneConnection {
     pub director_vars: Option<ServerZoneIpcSegment>,
     /// Current dye action information.
     pub dyeing_information: Option<DyeInformation>,
+    /// State for an in-progress materia attach session (self-meld, ClientTrigger 407-409).
+    pub meld_session: Option<MeldSession>,
+    /// State for an in-progress materia retrieval (拆, ClientTrigger 2800 -> retrieval action).
+    pub materia_retrieval: Option<MateriaRetrieval>,
+    /// Work queued to run at a later time, drained by the connection loop. See [`DeferredTask`].
+    pub deferred_tasks: Vec<ScheduledTask>,
     /// True while a friend-list duty-enrichment round-trip is in flight (Channel B). Guards against
     /// firing a second request (or draining an un-enriched page) if the client reopens/re-requests
     /// the first page before the response arrives.
@@ -262,6 +313,54 @@ pub struct ZoneConnection {
 impl ZoneConnection {
     pub fn parse_packet(&mut self, data: &[u8]) -> Vec<PacketSegment<ClientZoneIpcSegment>> {
         parse_packet(data, &mut self.state)
+    }
+
+    /// Queues `task` to run after `delay`.
+    ///
+    /// Use this whenever the client is playing an animation the server must not interrupt. Sending
+    /// a result the instant the client asks for it makes the client cut its own animation short,
+    /// because it applies the outcome as soon as it arrives.
+    pub fn schedule_task(&mut self, task: DeferredTask, delay: Duration) {
+        self.deferred_tasks.push(ScheduledTask {
+            run_at: Instant::now() + delay,
+            task,
+        });
+    }
+
+    /// How long until the soonest queued task is due, or `None` if nothing is queued.
+    ///
+    /// The connection loop uses this to sleep exactly as long as it needs to.
+    pub fn next_task_delay(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.deferred_tasks
+            .iter()
+            .map(|scheduled| scheduled.run_at.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Runs every queued task whose time has come, leaving the rest alone.
+    pub async fn run_due_tasks(&mut self) {
+        let now = Instant::now();
+
+        // Split rather than drain-in-place so a task that queues another task can't be run in the
+        // same pass (which would let a zero-delay task spin the loop).
+        let mut due = Vec::new();
+        self.deferred_tasks.retain(|scheduled| {
+            if scheduled.run_at <= now {
+                due.push(scheduled.task.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        for task in due {
+            match task {
+                DeferredTask::FinishMateriaRetrieval => {
+                    self.finish_materia_retrieval().await;
+                }
+            }
+        }
     }
 
     /// Sends an IPC segment to the player, where the source actor is also the player.

@@ -865,6 +865,9 @@ impl ZoneConnection {
                         tracing::warn!("finish_dyeing called without dye information prepared?!");
                     }
                 }
+                LuaTask::FinishMateriaRetrieval {} => {
+                    self.finish_materia_retrieval().await;
+                }
             }
         }
 

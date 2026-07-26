@@ -19,6 +19,9 @@ pub use gathering::*;
 mod crafting;
 pub use crafting::*;
 
+mod materia_retrieval;
+pub use materia_retrieval::*;
+
 mod instance_content;
 pub use instance_content::*;
 

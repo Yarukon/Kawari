@@ -363,6 +363,17 @@ pub enum ActorControlCategory {
     #[brw(magic = 138u32)]
     DisableEventPosRollback { handler_id: HandlerId },
 
+    /// Plays a one-shot VFX on an actor. Seen on materia retrieval: 435 (`cft_noncft_matok0`) when
+    /// the materia is recovered, 322 (`itm_act_mis0f`) when it shatters.
+    #[brw(magic = 148u32)]
+    PlayVFX {
+        source_actor_id: u32,
+        target_actor_id: u32,
+        unk1: u32,
+        /// Index into the VFX sheet.
+        vfx_id: u32,
+    },
+
     /// If enabled, the client sends UpdatePositionHandlerInstance. When disabled (the default) then regular UpdatePositionHandler packets instead.
     #[brw(magic = 142u32)]
     EnableInstancePositionHandler {
@@ -617,6 +628,49 @@ pub enum ActorControlCategory {
     #[brw(magic = 343u32)]
     SetCaughtSpearfishBitmask { index: u32, value: u32 },
 
+    /// Materia attach (self-meld) session ended with the last attempt successful. Sent in reply to
+    /// ClientTrigger 408.
+    #[brw(magic = 347u32)]
+    MeldSessionOk {
+        /// HQ-flagged item id (real id + 1_000_000 when HQ), echoing ClientTrigger 407.
+        item_id_hq: u32,
+        /// Item id of the last materia used in this session.
+        materia_item_id: u32,
+        /// Number of failed attempts in this session.
+        failed_count: u32,
+        unk: u32,
+    },
+
+    /// Materia attach (self-meld) session ended with the last attempt failed. Sent in reply to
+    /// ClientTrigger 408.
+    #[brw(magic = 348u32)]
+    MeldSessionFailed {
+        /// HQ-flagged item id (real id + 1_000_000 when HQ), echoing ClientTrigger 407.
+        item_id_hq: u32,
+        /// Item id of the last materia used in this session.
+        materia_item_id: u32,
+        /// Number of failed attempts in this session.
+        failed_count: u32,
+        unk: u32,
+    },
+
+    /// Server acknowledges opening of a materia attach session (reply to ClientTrigger 407).
+    #[brw(magic = 349u32)]
+    MeldSessionOpened {},
+
+    /// Server acknowledges teardown of a materia attach session (reply to ClientTrigger 409).
+    #[brw(magic = 350u32)]
+    MeldSessionClosed {},
+
+    /// Result of a single meld attempt. Sent before the inventory updates for that attempt.
+    #[brw(magic = 351u32)]
+    MeldAttemptResult {
+        /// Mirrors the request's repeat flag.
+        repeat_echo: u32,
+        /// Number of failed attempts so far in this session.
+        failed_count: u32,
+    },
+
     #[brw(magic = 378u32)]
     PlayerCurrency {
         unk1: u32,
@@ -672,6 +726,14 @@ pub enum ActorControlCategory {
     /// Plays an animation for a SharedGroup object.
     #[brw(magic = 410u32)]
     PlaySharedGroupTimeline { timeline_id: u32 },
+
+    /// Plays an emote-style animation on the player. Seen on a successful materia retrieval with
+    /// timeline 708 (`emote/joy`); a failed retrieval sends nothing here.
+    #[brw(magic = 412u32)]
+    PlayEmoteTimeline {
+        /// See the ActionTimeline Excel sheet.
+        timeline_id: u32,
+    },
 
     #[brw(magic = 413u32)]
     EObjAnimation { param1: u32, param2: u32 },

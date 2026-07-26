@@ -615,6 +615,10 @@ impl LuaPlayer {
     fn finish_dyeing(&mut self) {
         self.queued_tasks.push(LuaTask::FinishDyeing {});
     }
+
+    fn finish_materia_retrieval(&mut self) {
+        self.queued_tasks.push(LuaTask::FinishMateriaRetrieval {});
+    }
 }
 
 impl UserData for LuaPlayer {
@@ -1151,6 +1155,11 @@ impl UserData for LuaPlayer {
         });
         methods.add_method_mut("finish_dyeing", |_, this, _: ()| {
             this.finish_dyeing();
+            Ok(())
+        });
+
+        methods.add_method_mut("finish_materia_retrieval", |_, this, _: ()| {
+            this.finish_materia_retrieval();
             Ok(())
         });
     }

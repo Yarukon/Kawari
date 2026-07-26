@@ -22,6 +22,17 @@ use kawari::{
     },
 };
 
+/// Splits a trailing high-quality marker off an item id token: `"47180h"` -> `("47180", true)`.
+///
+/// Only ever applied to the numeric-id form of `!item`. The by-name form is left alone on purpose,
+/// because plenty of item names legitimately end in `h` and stripping that would break them.
+fn split_hq_marker(token: &str) -> (&str, bool) {
+    match token.strip_suffix(['h', 'H']) {
+        Some(rest) => (rest, true),
+        None => (token, false),
+    }
+}
+
 impl ZoneConnection {
     pub async fn send_message(&mut self, message: MessageInfo) {
         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ChatMessage(ChatMessage {
@@ -185,17 +196,25 @@ impl ZoneConnection {
                     // `!item 4551,5447*3, 20*99`. If the whole argument has no comma and isn't a
                     // bare number, fall back to the original single item-by-name lookup so existing
                     // usage (`!item Iron Sword`) keeps working.
+                    // An id may carry a trailing `h` to ask for the HQ version (`47180h*2`), so the
+                    // marker has to come off before the number is parsed -- otherwise `!item 47180h`
+                    // fails this check and silently falls through to the by-name lookup.
                     let looks_like_id_list = args.contains(',')
-                        || args
-                            .split_once('*')
-                            .map(|(id, _)| id.trim())
-                            .unwrap_or(args)
-                            .parse::<u32>()
-                            .is_ok();
+                        || split_hq_marker(
+                            args.split_once('*')
+                                .map(|(id, _)| id.trim())
+                                .unwrap_or(args),
+                        )
+                        .0
+                        .parse::<u32>()
+                        .is_ok();
 
                     if looks_like_id_list {
                         let mut added = 0u32;
                         let mut failures: Vec<String> = Vec::new();
+                        // Ids that asked for HQ but have no HQ version, reported back so the
+                        // normal-quality result doesn't look like a bug.
+                        let mut downgraded: Vec<u32> = Vec::new();
 
                         for entry in args.split(',') {
                             let entry = entry.trim();
@@ -212,6 +231,8 @@ impl ZoneConnection {
                                 None => (entry, 1),
                             };
 
+                            let (id_str, wants_hq) = split_hq_marker(id_str);
+
                             let Ok(id) = id_str.parse::<u32>() else {
                                 failures.push(format!("{id_str:?} (not a number)"));
                                 continue;
@@ -220,9 +241,22 @@ impl ZoneConnection {
                             let new_item;
                             {
                                 let mut gamedata = self.gamedata.lock();
-                                new_item = gamedata
-                                    .get_item_info(ItemInfoQuery::ById(id))
-                                    .map(|info| Item::new(&info, quantity));
+                                new_item = gamedata.get_item_info(ItemInfoQuery::ById(id)).map(
+                                    |info| {
+                                        let mut item = Item::new(&info, quantity);
+                                        // Bit 0 of item_flags is the HQ flag. An item with no HQ
+                                        // version silently stays normal quality; that is reported
+                                        // in the summary so it doesn't look like a failed add.
+                                        if wants_hq {
+                                            if info.can_be_hq {
+                                                item.item_flags |= 1;
+                                            } else {
+                                                downgraded.push(id);
+                                            }
+                                        }
+                                        item
+                                    },
+                                );
                             }
 
                             match new_item {
@@ -245,6 +279,14 @@ impl ZoneConnection {
                         }
 
                         let mut summary = format!("[item] Added {added} item(s).");
+                        if !downgraded.is_empty() {
+                            let ids: Vec<String> =
+                                downgraded.iter().map(|id| id.to_string()).collect();
+                            summary.push_str(&format!(
+                                " No HQ version, gave normal quality: {}.",
+                                ids.join(", ")
+                            ));
+                        }
                         if !failures.is_empty() {
                             summary.push_str(&format!(" Failed: {}.", failures.join(", ")));
                         }
@@ -273,7 +315,7 @@ impl ZoneConnection {
                     }
                 } else {
                     self.send_notice(
-                        "[item] Usage: !item <item name> | !item <id>[*qty][,<id>[*qty]...]",
+                        "[item] Usage: !item <item name> | !item <id>[h][*qty][,<id>[h][*qty]...] (h = HQ)",
                     )
                     .await;
                 }
@@ -513,5 +555,47 @@ impl ZoneConnection {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_hq_marker;
+
+    /// Mirrors the `looks_like_id_list` predicate in the `!item` handler. Kept in sync by hand;
+    /// its only job here is to prove an HQ-marked id is still recognised as the id form.
+    fn looks_like_id_list(args: &str) -> bool {
+        args.contains(',')
+            || split_hq_marker(args.split_once('*').map(|(id, _)| id.trim()).unwrap_or(args))
+                .0
+                .parse::<u32>()
+                .is_ok()
+    }
+
+    #[test]
+    fn hq_marker_is_split_off_an_id() {
+        assert_eq!(split_hq_marker("47180h"), ("47180", true));
+        assert_eq!(split_hq_marker("47180H"), ("47180", true));
+        assert_eq!(split_hq_marker("47180"), ("47180", false));
+    }
+
+    #[test]
+    fn an_hq_marked_id_is_still_recognised_as_the_id_form() {
+        // Regression: without stripping the marker first, `"47180h".parse::<u32>()` fails and the
+        // whole argument silently falls through to the by-name lookup, which then reports the item
+        // as unknown.
+        assert!(looks_like_id_list("47180h"));
+        assert!(looks_like_id_list("47180h*2"));
+        assert!(looks_like_id_list("47180H*2"));
+        assert!(looks_like_id_list("47180"));
+        assert!(looks_like_id_list("47180*2"));
+    }
+
+    #[test]
+    fn item_names_are_not_mistaken_for_ids() {
+        // Names ending in `h` are exactly why the marker is only stripped on the id path.
+        assert!(!looks_like_id_list("Iron Sword"));
+        assert!(!looks_like_id_list("Fish"));
+        assert!(!looks_like_id_list("Cloth"));
     }
 }

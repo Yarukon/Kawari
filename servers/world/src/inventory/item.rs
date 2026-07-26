@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::ItemRow;
 
+/// Strips the HQ flag from a wire item id. The client sends HQ items as `real_id + 1_000_000`
+/// (seen in ClientTrigger 407/2800, ActorControl 347/348 and the meld request itself), while the
+/// inventory always stores the plain catalog id.
+pub fn item_id_base(hq_id: u32) -> u32 {
+    if hq_id >= 1_000_000 {
+        hq_id - 1_000_000
+    } else {
+        hq_id
+    }
+}
+
 /// Represents an item, or if the quantity is zero, an empty slot.
 #[derive(Default, Copy, Clone, Serialize, Deserialize, Debug)]
 pub struct Item {
@@ -40,6 +51,10 @@ pub struct Item {
     #[serde(skip)]
     pub equip_slot_category: u8,
     #[serde(skip)]
+    pub materia_slot_count: u8,
+    #[serde(skip)]
+    pub is_advanced_melding_permitted: bool,
+    #[serde(skip)]
     pub base_param_ids: [u8; 6],
     #[serde(skip)]
     pub base_param_values: [i16; 6],
@@ -55,14 +70,28 @@ pub struct Item {
 
 impl Item {
     pub fn new(item_info: &ItemRow, quantity: u32) -> Self {
+        // A materia carries its own identity in slot 0. The client reads its grade from there to
+        // decide which overmeld success rate to display, so a materia without it reads as grade 0
+        // (壹型) and shows that grade's rate instead of its own.
+        let mut materia = [0u16; 5];
+        let mut materia_grades = [0u8; 5];
+        if let Some((row, grade_index)) = item_info.materia_identity {
+            materia[0] = row;
+            materia_grades[0] = grade_index;
+        }
+
         Self {
             quantity,
             item_id: item_info.id,
             condition: ITEM_CONDITION_MAX,
+            materia,
+            materia_grades,
             item_level: item_info.item_level,
             stack_size: item_info.stack_size,
             price_low: item_info.price_low,
             equip_slot_category: item_info.equip_category.clone() as u8,
+            materia_slot_count: item_info.materia_slot_count,
+            is_advanced_melding_permitted: item_info.is_advanced_melding_permitted,
             base_param_ids: item_info.base_param_ids,
             base_param_values: item_info.base_param_values,
             defense: item_info.defense,
