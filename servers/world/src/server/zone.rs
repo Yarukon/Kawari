@@ -1028,6 +1028,23 @@ pub fn restore_carried_combat_state(
     }
 }
 
+/// Picks a random position out of a pop range, so that everyone arriving at the same aetheryte
+/// doesn't pile up on one spot. Most pop ranges offer several positions; the object's own
+/// translation is the fallback when it offers none.
+fn pick_point_in_pop_range(object: &InstanceObject) -> Position {
+    let base = Position(glam::Vec3::from_array(object.transform.translation));
+
+    let LayerEntryData::PopRange(pop_range) = &object.data else {
+        return base;
+    };
+
+    let Some(offset) = fastrand::choice(&pop_range.positions) else {
+        return base;
+    };
+
+    Position(glam::Vec3::from_array(object.transform.translation) + glam::Vec3::from_slice(offset))
+}
+
 pub fn change_zone_warp_to_pop_range(
     data: &mut WorldServer,
     network: &mut NetworkState,
@@ -1058,9 +1075,9 @@ pub fn change_zone_warp_to_pop_range(
     if let Some((destination_object, _)) =
         target_instance.zone.find_pop_range(destination_instance_id)
     {
-        let (_, rotation, translation) =
+        let (_, rotation, _) =
             Affine3A::from(destination_object.transform).to_scale_rotation_translation();
-        exit_position = Some(Position(translation));
+        exit_position = Some(pick_point_in_pop_range(destination_object));
         exit_rotation = Some(euler_to_direction(rotation.to_euler(EulerRot::XYZ)));
     } else {
         tracing::warn!(
@@ -1104,9 +1121,7 @@ pub fn change_zone_warp_to_entrance(
     let exit_position;
     let exit_rotation;
     if let Some(destination_object) = target_instance.zone.find_entrance() {
-        let (_, _, translation) =
-            Affine3A::from(destination_object.transform).to_scale_rotation_translation();
-        exit_position = Some(Position(translation));
+        exit_position = Some(pick_point_in_pop_range(destination_object));
         exit_rotation = Some(entrance_rect.map_or(FRAC_PI_2, |(_, rot)| rot));
     } else if let Some((pos, rot)) = entrance_rect {
         exit_position = Some(pos);

@@ -207,6 +207,14 @@ pub enum ActorControlCategory {
     #[brw(magic = 27u32)]
     Flee { speed: u16 },
 
+    #[brw(magic = 34u32)]
+    ShowLockonVfx {
+        /// Index into the Lockon Excel sheet.
+        id: u32,
+        /// Who to show the lockon VFX on.
+        target: ObjectId,
+    },
+
     #[brw(magic = 35u32)]
     Tether {
         /// This corresponds to row id from the Channeling sheet.
@@ -1233,11 +1241,15 @@ pub enum ActorControlCategory {
 
     /// Collection UI stuff.
     #[brw(magic = 2251u32)]
-    McGuffinUnk {
-        unk1: u32,
-        unk2: u32,
-        unk3: u32,
-        unk4: u32,
+    UpdateMcGuffin {
+        /// Data specific to this McGuffin.
+        data: u32,
+        /// Index into the McGuffin Excel sheet.
+        id: u32,
+        /// If this McGuffin is unlocked or not.
+        #[br(map = read_bool_from::<u32>)]
+        #[bw(map = write_bool_as::<u32>)]
+        unlocked: bool,
     },
 
     #[brw(magic = 2351u32)]
@@ -1309,12 +1321,11 @@ pub enum ActorControlCategory {
 
     /// Sets progress and other fields too. Unsure why this is used sometimes instead of FateProgress?
     #[brw(magic = 2364u32)]
-    UnkFate7 {
+    FateUpdate {
         /// Index into the FATE Excel sheet.
         fate_id: u32,
-        unk2: u32,
-        unk3: u32,
-        unk4: u32,
+        progress: u32,
+        param: u32,
     },
 
     #[brw(magic = 2365u32)]

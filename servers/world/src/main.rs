@@ -26,7 +26,8 @@ use kawari::ipc::zone::{
 
 use kawari::ipc::zone::{
     Blacklist, BlacklistedCharacter, ClientTriggerCommand, ClientZoneIpcData, ClientZoneIpcSegment,
-    MeldMateriaRequest, ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment,
+    MeldMateriaRequest, ReadyCheckReply, RecruitingPartyDetail, RecruitingPartyEntry,
+    ServerZoneIpcData, ServerZoneIpcSegment,
 };
 
 use kawari::common::{CharacterMode, NETWORK_TIMEOUT, RECEIVE_BUFFER_SIZE};
@@ -3274,6 +3275,20 @@ async fn process_packet(
                             })
                             .await;
                     }
+                    ClientZoneIpcData::RequestRecruitingPartyCount { .. } => {
+                        // We don't track party recruitment yet, so report a single empty final
+                        // page. more_pages = 0 marks it as the last one, and count = 0 tells the
+                        // client not to read any of the entry slots.
+                        let ipc =
+                            ServerZoneIpcSegment::new(ServerZoneIpcData::RecruitingPartyCount {
+                                page_id: 0,
+                                more_pages: 0,
+                                count: 0,
+                                entries: [RecruitingPartyEntry::default(); 60],
+                                details: [RecruitingPartyDetail::default(); 60],
+                            });
+                        connection.send_ipc_self(ipc).await;
+                    }
                     ClientZoneIpcData::PingSync { timestamp, .. } => {
                         // this is *usually* sent in response, but not always
                         let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::PingSyncReply {
@@ -3840,6 +3855,12 @@ async fn process_packet(
                     }
                     ClientZoneIpcData::SetClientLanguage { language } => {
                         connection.player_data.volatile.client_language = *language;
+
+                        // We need to commit this to the database again since this is read everywhere.
+                        {
+                            let mut database = connection.database.lock();
+                            database.commit_volatile(&connection.player_data);
+                        }
                     }
                     ClientZoneIpcData::RequestCharaInfoFromContentIds { .. } => {
                         tracing::info!(

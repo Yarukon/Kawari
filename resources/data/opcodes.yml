@@ -807,6 +807,10 @@ ServerZoneIpcType:
   comment: Acknowledges a glamour plate save with the resolved armor/accessory contents.
   opcode: 605
   size: 80
+- name: RecruitingPartyCount
+  comment: Updates recruiting party counts for duties in the Duty Finder. Sent in pages of up to 60 entries; more_pages field indicates page sequence (1-based, 0=final). Each entry contains a category bitmap (lowest set bit index = category code 0-15) and content identification (ContentRoulette or ContentFinderCondition row ID).
+  opcode: 441
+  size: 968
 ClientZoneIpcType:
 - name: InitRequest
   comment: Sent by the client when they successfully initialize with the server, and they need several bits of information (e.g. what zone to load.)
@@ -1252,6 +1256,10 @@ ClientZoneIpcType:
   comment: Sent by the client to save a glamour plate from the dresser.
   opcode: 823
   size: 248
+- name: RequestRecruitingPartyCount
+  comment: Sent when opening up the Duty Finder.
+  opcode: 545
+  size: 8
 ServerLobbyIpcType:
 - name: NackReply
   comment: Sent by the server to indicate an lobby error occured.
