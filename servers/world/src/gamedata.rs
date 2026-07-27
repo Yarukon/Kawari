@@ -1178,8 +1178,14 @@ impl GameData {
                 AetheryteSheet::read_from(&mut self.resource, config.world.language()).ok()?;
             let row = sheet.row(aetheryte_id)?;
 
-            // TODO: just look in the level sheet?
-            let pop_range_id = row.Level[0];
+            // Pick a random pop range to stop people from spawning in the same position.
+            //
+            // The unused slots of this array are zero, and most rows have only the first one
+            // populated -- 132 of the sheet's 240 rows have a zero `Level[1]`, which covers every
+            // aethernet shard. Choosing over the raw array would hand back pop range 0 for those,
+            // so the empty slots are filtered out first.
+            let populated: Vec<u32> = row.Level.into_iter().filter(|id| *id != 0).collect();
+            let pop_range_id = fastrand::choice(populated).unwrap_or(row.Level[0]);
             let zone_id = row.Territory;
 
             Some((pop_range_id, zone_id))
