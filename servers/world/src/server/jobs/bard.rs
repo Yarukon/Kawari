@@ -55,6 +55,17 @@ const ACTION_RADIANT_ENCORE: u32 = 36977;
 
 // ==================== Status IDs ====================
 
+// Song Statuses. Applied by each song action's Lua script; listed here so that starting a song
+// can end the one it replaces (only one song is ever active).
+const STATUS_WANDERERS_MINUET: u16 = 2216;
+const STATUS_MAGES_BALLAD: u16 = 2217;
+const STATUS_ARMYS_PAEON: u16 = 2218;
+const SONG_STATUSES: [u16; 3] = [
+    STATUS_WANDERERS_MINUET,
+    STATUS_MAGES_BALLAD,
+    STATUS_ARMYS_PAEON,
+];
+
 // Song Proc Statuses
 const STATUS_REPERTOIRE: u16 = 3137; // Wanderer's Minuet proc - Pitch Perfect ready
 
@@ -431,6 +442,28 @@ fn remove_repertoire_status(status_effects: &mut StatusEffects) -> bool {
     true
 }
 
+/// Ends whichever song status is currently up, so that starting a new song cannot leave two
+/// song buffs on the player at once.
+///
+/// Only one song can be active at a time: `start_song` already overwrites the gauge state, but
+/// the song *status* is applied by each song's Lua script and would otherwise linger until its
+/// own 45s duration lapsed. Swapping songs a few seconds early — the normal rotation — showed
+/// both buffs side by side until the old one expired.
+///
+/// The incoming song's own status is applied by the Lua script for that action, which runs
+/// separately from this, so removing all three ids here is safe and keeps the caller from
+/// having to know which song it is replacing.
+fn remove_song_statuses(status_effects: &mut StatusEffects) -> bool {
+    let mut removed = false;
+    for status in SONG_STATUSES {
+        if status_effects.get(status).is_some() {
+            status_effects.remove(status);
+            removed = true;
+        }
+    }
+    removed
+}
+
 fn add_hawk_eye_status(
     status_effects: &mut StatusEffects,
     brd: &mut BardState,
@@ -648,15 +681,18 @@ pub(crate) fn update_bard_state_after_action(
         // Song activations
         ACTION_MAGES_BALLAD => {
             start_song(&mut combat_state.bard, BardSong::MagesBallad, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects);
+            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
+                | remove_song_statuses(status_effects);
         }
         ACTION_ARMYS_PAEON => {
             start_song(&mut combat_state.bard, BardSong::ArmysPaeon, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects);
+            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
+                | remove_song_statuses(status_effects);
         }
         ACTION_WANDERERS_MINUET => {
             start_song(&mut combat_state.bard, BardSong::WanderersMinuet, level);
-            action_update.status_timer_refreshed = remove_repertoire_status(status_effects);
+            action_update.status_timer_refreshed = remove_repertoire_status(status_effects)
+                | remove_song_statuses(status_effects);
         }
 
         // DoT applications
@@ -1085,6 +1121,44 @@ mod tests {
             &combat_state,
             90
         ));
+    }
+
+    /// Swapping songs must end the outgoing song's status immediately.
+    ///
+    /// Songs are swapped a few seconds early in a normal rotation. The status is applied by each
+    /// song's Lua script and used to expire purely on its own 45s duration, which left both song
+    /// buffs on the player until the old one lapsed.
+    #[test]
+    fn starting_a_song_ends_the_previous_song_status() {
+        let mut actor = make_player_actor();
+
+        // Stand in for the Lua-applied status of the song that is already running.
+        match &mut actor {
+            NetworkedActor::Player { status_effects, .. } => status_effects.add_with_source(
+                STATUS_MAGES_BALLAD,
+                0,
+                45.0,
+                ObjectId::default(),
+            ),
+            _ => unreachable!("expected a Player actor"),
+        }
+
+        let update =
+            update_bard_state_after_action(ACTION_WANDERERS_MINUET, &mut actor, ObjectId::default());
+
+        assert!(
+            status_effects_of(&actor).get(STATUS_MAGES_BALLAD).is_none(),
+            "the replaced song's status must be gone"
+        );
+        assert!(
+            update.status_timer_refreshed,
+            "the removal has to be flushed to the client"
+        );
+        assert_eq!(
+            bard_of(&actor).current_song,
+            BardSong::WanderersMinuet,
+            "the gauge must track the new song"
+        );
     }
 
     /// Barrage opens the gate (it grants Hawk's Eye stacks), but the consume arm zeroes those
