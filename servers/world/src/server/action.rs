@@ -171,6 +171,36 @@ pub(crate) fn apply_target_player_mitigation(
     amount
 }
 
+/// The `LoseEffect` status ids in `effects` that `actor_id` currently holds.
+///
+/// Must be called before the job modules run, because they consume most procs themselves and the
+/// live state is already clear by the time the `LoseEffect` entries are walked.
+///
+/// Filtering on what is actually held is also what keeps the client from announcing a removal
+/// twice: an action may list several ids for one concept (Blast Arrow declares both 2692 and
+/// 3142 for "Blast Arrow Ready") and only one of them is ever present.
+fn collect_held_lost_statuses(
+    instance: &Instance,
+    actor_id: ObjectId,
+    effects: &[ActionEffect],
+) -> Vec<u16> {
+    let Some(actor) = instance.find_actor(actor_id) else {
+        return Vec::new();
+    };
+    let Some(status_effects) = actor.status_effects() else {
+        return Vec::new();
+    };
+
+    effects
+        .iter()
+        .filter_map(|effect| match effect.kind {
+            EffectKind::LoseEffect { effect_id, .. } => Some(effect_id),
+            _ => None,
+        })
+        .filter(|effect_id| status_effects.get(*effect_id).is_some())
+        .collect()
+}
+
 fn remove_status_from_actor_instance(
     instance: &mut Instance,
     actor_id: ObjectId,
@@ -270,22 +300,62 @@ fn build_aoe_effect_packet(
     })
 }
 
+/// Bit 7 of an effect's flags byte: the status lands on the action's source, not its target.
+const EFFECT_FLAG_AT_SOURCE: u8 = 0x80;
+
+/// Marks a caster-bound status gain as such for the client.
+///
+/// The two gain kinds say *who a single entry is for*, independent of whom the action was
+/// aimed at: 14 (`ApplyStatusEffectTarget`) goes to the action's target, 15
+/// (`ApplyStatusEffectSource`) bypasses it and goes to the caster. Standard Finish shows both
+/// in one packet while aimed at the dancer -- the party buffs ride 14, the Last Dance Ready
+/// proc rides 15 -- so the choice cannot come from the action's target. It comes from which
+/// Lua call the script used: `gain_effect` means "to the target", `gain_effect_self` means
+/// "to the caster".
+///
+/// Only the flag needs adding. `unk3` is the flags byte (BossMod calls it Param4) and bit 7 is
+/// "at source"; without it the client credits the buff to the target and announces it there --
+/// Apex Arrow on a striking dummy read as the dummy gaining Blast Arrow Ready.
+fn wire_effect_kind(kind: EffectKind) -> EffectKind {
+    match kind {
+        EffectKind::GainEffectSelf {
+            unk1,
+            unk2,
+            unk3,
+            effect_id,
+            param,
+            duration,
+        } => EffectKind::GainEffectSelf {
+            unk1,
+            unk2,
+            unk3: unk3 | EFFECT_FLAG_AT_SOURCE,
+            effect_id,
+            param,
+            duration,
+        },
+        other => other,
+    }
+}
+
+/// Builds the `ActionResult` effect array shown to the client.
+///
+/// Status gains must reach the client through here: this array drives the buff-applied animation
+/// and the "X gains Y" battle log line. Filtering them out left songs and self-buffs silent.
 fn target_action_result_effects(effects: &[ActionEffect]) -> ([ActionEffect; 8], u8) {
     let mut target_effects = [ActionEffect::default(); 8];
     let mut count = 0usize;
 
     for effect in effects {
-        if matches!(
-            effect.kind,
-            EffectKind::GainEffectSelf { .. } | EffectKind::LoseEffect { .. }
-        ) {
+        if matches!(effect.kind, EffectKind::LoseEffect { .. }) {
             continue;
         }
         if count == target_effects.len() {
             break;
         }
 
-        target_effects[count] = *effect;
+        target_effects[count] = ActionEffect {
+            kind: wire_effect_kind(effect.kind),
+        };
         count += 1;
     }
 
@@ -1018,6 +1088,8 @@ pub fn execute_action(
         let summoner_gauge_data;
         let bard_gauge_data;
         let bard_action_update;
+        // Sampled inside the data block below, read by the LoseEffect loop further down.
+        let lost_statuses: Vec<u16>;
         let action_mp_cost = if resolved_request.action_type == ActionType::Action {
             let mut game_data = game_data.lock();
             game_data.get_action_mp_cost(resolved_request.action_id)
@@ -1424,6 +1496,14 @@ pub fn execute_action(
                     }
                 }
             }
+
+            // The action's LoseEffect statuses that the caster really holds, sampled BEFORE the
+            // job modules below can consume them. See `lost_statuses` use further down.
+            lost_statuses = collect_held_lost_statuses(
+                instance,
+                from_actor_id,
+                &effects_builder.effects,
+            );
 
             // Register damage barriers requested by the action. The status itself is also sent as a
             // normal gain effect, but the absorb pool lives server-side and is consumed on damage.
@@ -1885,9 +1965,19 @@ pub fn execute_action(
                     let mut data = data.lock();
                     if let Some(instance) = data.find_actor_instance_mut(from_actor_id) {
                         remove_status_from_actor_instance(instance, from_actor_id, effect_id);
+                        if lost_statuses.contains(&effect_id) {
+                            let ipc = ActorControlCategory::LoseEffect {
+                                effect_id: effect_id as u32,
+                                unk2: 0,
+                                source_actor_id: from_actor_id,
+                            };
+                            network.lock().send_ac_in_range_inclusive_instance(
+                                instance,
+                                from_actor_id,
+                                ipc,
+                            );
+                        }
                     }
-                    self_entries[num_self_entries as usize] = EffectEntry::default();
-                    num_self_entries += 1;
                 }
             }
 
@@ -2142,10 +2232,9 @@ pub fn execute_enemy_action(
                     num_entries += 1;
                 }
 
-                if let EffectKind::LoseEffect { .. } = effect.kind {
-                    entries[num_entries as usize] = EffectEntry::default();
-                    num_entries += 1;
-                }
+                // A LoseEffect deliberately takes no entry. EffectResult is a gain notification
+                // and the client writes each entry to the slot named by its `index`, so a zeroed
+                // entry reads as "slot 0 is now empty" and wipes whatever really occupied it.
             }
 
             let Some(actor) = instance.find_actor(request.target.object_id) else {
@@ -2499,5 +2588,135 @@ pub fn update_actor_hp_mp(
 
     if send_kill_actor {
         kill_actor(network, instance, target_actor_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLAST_ARROW_READY: u16 = 2692;
+    const BLAST_ARROW_READY_ALT: u16 = 3142;
+
+    fn lose(effect_id: u16) -> ActionEffect {
+        ActionEffect {
+            kind: EffectKind::LoseEffect {
+                param: 0,
+                unk: [0; 3],
+                effect_id,
+            },
+        }
+    }
+
+    fn gain_target(effect_id: u16) -> ActionEffect {
+        ActionEffect {
+            kind: EffectKind::GainEffect {
+                unk1: 0,
+                unk2: 0,
+                unk3: 0,
+                effect_id,
+                param: 0,
+                duration: 30.0,
+            },
+        }
+    }
+
+    fn gain_self(effect_id: u16) -> ActionEffect {
+        ActionEffect {
+            kind: EffectKind::GainEffectSelf {
+                unk1: 0,
+                unk2: 0,
+                unk3: 0,
+                effect_id,
+                param: 0,
+                duration: 30.0,
+            },
+        }
+    }
+
+    /// Status gains have to survive into the array, or the client never plays the buff animation
+    /// or writes the log line — songs and Raging Strikes were silent because the whole kind was
+    /// filtered out. The kind itself is preserved: it encodes who the entry is for.
+    #[test]
+    fn status_gains_reach_the_client() {
+        let (effects, count) =
+            target_action_result_effects(&[gain_target(1821), gain_self(3867)]);
+
+        assert_eq!(count, 2);
+        assert!(matches!(
+            effects[0].kind,
+            EffectKind::GainEffect { effect_id: 1821, .. }
+        ));
+        assert!(matches!(
+            effects[1].kind,
+            EffectKind::GainEffectSelf { effect_id: 3867, .. }
+        ));
+    }
+
+    /// A removal is announced over its own ActorControl, so it must not take a slot in here: the
+    /// client writes each entry to the slot its `index` names, and a blank entry wipes slot 0.
+    #[test]
+    fn removals_take_no_entry() {
+        let (_, count) = target_action_result_effects(&[lose(2692)]);
+
+        assert_eq!(count, 0);
+    }
+
+    /// The flags byte has to say "at source", or the client credits the buff to the action's
+    /// target: Apex Arrow on a striking dummy announced the dummy gaining Blast Arrow Ready.
+    #[test]
+    fn a_gain_on_the_caster_is_flagged_at_source() {
+        let (effects, count) = target_action_result_effects(&[gain_self(2692)]);
+
+        assert_eq!(count, 1);
+        let EffectKind::GainEffectSelf { unk3, .. } = effects[0].kind else {
+            panic!("expected the gain to stay GainEffectSelf, got {:?}", effects[0].kind);
+        };
+        assert_eq!(unk3 & EFFECT_FLAG_AT_SOURCE, EFFECT_FLAG_AT_SOURCE);
+    }
+
+    /// The wire layout Kawari writes must line up with the one the client reads. Field-for-field
+    /// against a retail Sprint capture: `0E 00 00 14 00 00 AF 04`, which BossMod decodes as
+    /// Type=14, Param2=20, Param4=0 (flags), Value=1199.
+    #[test]
+    fn a_gain_effect_serializes_to_the_retail_byte_layout() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let effect = ActionEffect {
+            kind: EffectKind::GainEffect {
+                unk1: 0,
+                unk2: 0,
+                unk3: 0,
+                effect_id: 1199,
+                param: 20,
+                duration: 30.0,
+            },
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        effect.write_le(&mut cursor).unwrap();
+
+        assert_eq!(cursor.into_inner(), vec![0x0E, 0, 0, 0x14, 0, 0, 0xAF, 0x04]);
+    }
+
+    /// Only the ids the caster really holds are reported, so the client is not told twice about
+    /// one removal. Blast Arrow declares both of its Ready ids, but only one is ever present.
+    #[test]
+    fn held_lost_statuses_skip_ids_the_actor_does_not_have() {
+        let mut instance = Instance::default();
+        let actor_id = ObjectId(1);
+        instance.insert_empty_actor(actor_id);
+
+        if let Some(actor) = instance.find_actor_mut(actor_id)
+            && let Some(status_effects) = actor.status_effects_mut()
+        {
+            status_effects.add(BLAST_ARROW_READY, 0, 10.0);
+        }
+
+        let effects = [lose(BLAST_ARROW_READY), lose(BLAST_ARROW_READY_ALT)];
+        let held = collect_held_lost_statuses(&instance, actor_id, &effects);
+
+        assert_eq!(held, vec![BLAST_ARROW_READY]);
     }
 }
