@@ -55,6 +55,12 @@ struct StatusExpiration {
     expires_at: Instant,
 }
 
+/// How many statuses an actor can carry at once, matching the fixed-size array in the
+/// `StatusEffectList` packet. Expired statuses leave their slot behind rather than shifting the
+/// later ones down (the client keys buffs by slot index), so the list only ever grows and needs
+/// this bound to stay inside the wire format.
+pub const MAX_STATUS_EFFECTS: usize = 30;
+
 #[derive(Debug, Default, Clone)]
 pub struct StatusEffects {
     status_effects: Vec<StatusEffect>,
@@ -83,7 +89,13 @@ impl StatusEffects {
         duration: f32,
         source_actor_id: ObjectId,
     ) {
-        let status_effect = self.find_or_create_status_effect(effect_id);
+        let Some(status_effect) = self.find_or_create_status_effect(effect_id) else {
+            tracing::warn!(
+                effect_id,
+                "Dropping status effect: all {MAX_STATUS_EFFECTS} slots are in use."
+            );
+            return;
+        };
         status_effect.param = effect_param;
         status_effect.duration = duration;
         status_effect.source_actor_id = source_actor_id;
@@ -197,8 +209,12 @@ impl StatusEffects {
                 .map(|barrier| barrier.effect_id)
                 .collect();
             self.barriers.retain(|barrier| barrier.remaining > 0);
-            self.status_effects
-                .retain(|effect| !broken_effect_ids.contains(&effect.effect_id));
+            // Blank the slots rather than compacting, for the same reason as `remove`.
+            for effect in &mut self.status_effects {
+                if broken_effect_ids.contains(&effect.effect_id) {
+                    *effect = StatusEffect::default();
+                }
+            }
             self.expirations
                 .retain(|expiration| !broken_effect_ids.contains(&expiration.effect_id));
             self.tick_effects
@@ -209,20 +225,42 @@ impl StatusEffects {
         remaining_damage
     }
 
-    fn find_or_create_status_effect(&mut self, effect_id: u16) -> &mut StatusEffect {
+    /// Finds the slot holding `effect_id`, or claims a free one for it.
+    ///
+    /// A new status takes the first hole left behind by an expired one before extending the list,
+    /// which is what retail does -- a second sprint cast came back in the slot the expired potion
+    /// had occupied rather than landing past it. Returns `None` once all
+    /// [`MAX_STATUS_EFFECTS`] slots are taken, since the wire packet cannot carry more.
+    fn find_or_create_status_effect(&mut self, effect_id: u16) -> Option<&mut StatusEffect> {
         if let Some(i) = self
             .status_effects
             .iter()
             .position(|effect| effect.effect_id == effect_id)
         {
-            &mut self.status_effects[i]
-        } else {
-            self.status_effects.push(StatusEffect {
-                effect_id,
-                ..Default::default()
-            });
-            self.status_effects.last_mut().unwrap()
+            return Some(&mut self.status_effects[i]);
         }
+
+        let free_slot = self
+            .status_effects
+            .iter()
+            .position(|effect| effect.effect_id == 0);
+
+        let i = match free_slot {
+            Some(i) => i,
+            None => {
+                if self.status_effects.len() >= MAX_STATUS_EFFECTS {
+                    return None;
+                }
+                self.status_effects.push(StatusEffect::default());
+                self.status_effects.len() - 1
+            }
+        };
+
+        self.status_effects[i] = StatusEffect {
+            effect_id,
+            ..Default::default()
+        };
+        Some(&mut self.status_effects[i])
     }
 
     fn set_expiration(&mut self, effect_id: u16, duration: f32) {
@@ -255,6 +293,9 @@ impl StatusEffects {
     }
 
     pub fn get(&self, effect_id: u16) -> Option<StatusEffect> {
+        if effect_id == 0 {
+            return None;
+        }
         self.status_effects
             .iter()
             .position(|effect| effect.effect_id == effect_id)
@@ -265,6 +306,9 @@ impl StatusEffects {
     /// client keys buffs by this slot, so packets referencing a status (e.g. EffectResult) must use
     /// the same index or the buff is drawn twice.
     pub fn position_of(&self, effect_id: u16) -> Option<usize> {
+        if effect_id == 0 {
+            return None;
+        }
         self.status_effects
             .iter()
             .position(|effect| effect.effect_id == effect_id)
@@ -276,7 +320,10 @@ impl StatusEffects {
             .iter()
             .position(|effect| effect.effect_id == effect_id)
         {
-            self.status_effects.remove(i);
+            // Blank the slot instead of closing the gap. The client keys buffs by the slot index it
+            // was handed in EffectResult, so shifting the later statuses down would redraw them in
+            // the wrong places on the next full StatusEffectList. Retail leaves the same hole.
+            self.status_effects[i] = StatusEffect::default();
             self.expirations
                 .retain(|expiration| expiration.effect_id != effect_id);
             self.dirty = true;
@@ -320,19 +367,23 @@ impl StatusEffects {
 mod tests {
     use super::*;
 
+    /// Sprint. Used as the stand-in status here because effect id 0 marks an empty slot -- the Status
+    /// sheet has no row 0, so a real status can never carry that id.
+    const STATUS_SPRINT: u16 = 50;
+
     #[test]
     fn test_status_effects() {
         // Ensure sensible initial state
         let mut status_effects = StatusEffects::default();
-        assert_eq!(status_effects.get(0), None);
+        assert_eq!(status_effects.get(STATUS_SPRINT), None);
         assert_eq!(status_effects.is_dirty(), false);
 
         // Add a status effect, check that it can be grabbed again, and that the dirty flag is set:
-        status_effects.add(0, 0, 0.0);
+        status_effects.add(STATUS_SPRINT, 0, 0.0);
         assert_eq!(
-            status_effects.get(0),
+            status_effects.get(STATUS_SPRINT),
             Some(StatusEffect {
-                effect_id: 0,
+                effect_id: STATUS_SPRINT,
                 param: 0,
                 duration: 0.0,
                 source_actor_id: Default::default()
@@ -345,8 +396,8 @@ mod tests {
         assert_eq!(status_effects.is_dirty(), false);
 
         // Removing a status should mark it as dirty, and it should really be gone:
-        status_effects.remove(0);
-        assert_eq!(status_effects.get(0), None);
+        status_effects.remove(STATUS_SPRINT);
+        assert_eq!(status_effects.get(STATUS_SPRINT), None);
         assert_eq!(status_effects.is_dirty(), true);
     }
 
@@ -398,5 +449,69 @@ mod tests {
 
         assert_eq!(status_effects.barrier_amount(), 1000);
         assert_eq!(status_effects.absorb_damage(1200), 200);
+    }
+
+    /// Retail leaves a hole behind when a status expires rather than closing the gap: a capture of
+    /// a food (slot 0) + potion (slot 1) + sprint (slot 2) stack showed slot 1 reading id 0 once
+    /// the potion ran out, with the food still sitting in slot 0.
+    ///
+    /// This matters because the client keys buffs by the slot index it was handed in EffectResult.
+    /// Compacting the list shifts every later status one slot down, so the next full
+    /// StatusEffectList redraws them in the wrong places -- the symptom being a buff that vanishes
+    /// and reappears as unrelated statuses come and go.
+    #[test]
+    fn removing_a_status_leaves_the_later_slots_in_place() {
+        let mut status_effects = StatusEffects::default();
+        status_effects.add(48, 0, 1800.0);
+        status_effects.add(49, 0, 30.0);
+        status_effects.add(1199, 0, 30.0);
+
+        assert_eq!(status_effects.position_of(1199), Some(2));
+
+        status_effects.remove(49);
+
+        assert_eq!(status_effects.position_of(48), Some(0));
+        assert_eq!(status_effects.position_of(1199), Some(2));
+
+        let data = status_effects.data();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[1].effect_id, 0);
+        assert_eq!(data[1].duration, 0.0);
+    }
+
+    /// The counterpart to the hole: retail hands the *first* free slot to the next status. A second
+    /// sprint cast after the potion had expired came back as slot 1, reusing the gap rather than
+    /// landing past it.
+    #[test]
+    fn a_new_status_reuses_the_first_hole() {
+        let mut status_effects = StatusEffects::default();
+        status_effects.add(48, 0, 1800.0);
+        status_effects.add(49, 0, 30.0);
+        status_effects.add(1199, 0, 30.0);
+        status_effects.remove(49);
+
+        status_effects.add(STATUS_SPRINT, 0, 20.0);
+
+        assert_eq!(status_effects.position_of(STATUS_SPRINT), Some(1));
+        assert_eq!(status_effects.position_of(1199), Some(2));
+        assert_eq!(status_effects.data().len(), 3);
+    }
+
+    /// Holes are never reclaimed by shrinking the list, so the slot count only ever grows. The wire
+    /// packet is a fixed 30-entry array and `send_effects_list` copies straight into it, so going
+    /// past 30 would panic on the slice bounds.
+    #[test]
+    fn the_status_list_never_grows_past_the_wire_limit() {
+        let mut status_effects = StatusEffects::default();
+        for i in 0..MAX_STATUS_EFFECTS {
+            status_effects.add(100 + i as u16, 0, 30.0);
+        }
+
+        assert_eq!(status_effects.len(), MAX_STATUS_EFFECTS);
+
+        status_effects.add(999, 0, 30.0);
+
+        assert_eq!(status_effects.len(), MAX_STATUS_EFFECTS);
+        assert_eq!(status_effects.get(999), None);
     }
 }
