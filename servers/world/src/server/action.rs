@@ -1560,6 +1560,15 @@ pub fn execute_action(
             );
         }
 
+        // The global sequence the action packet below actually consumed. The `EffectResult`s sent
+        // further down describe the status changes *from this action*, so they have to quote the
+        // same number rather than taking one of their own -- that is what lets the client tie the
+        // two together.
+        //
+        // Stays 0 only if no action packet went out at all (the AoE builder refusing to produce
+        // one), in which case there is nothing for the client to correlate against anyway.
+        let mut action_global_sequence = 0;
+
         {
             let (effects, effect_count) = target_action_result_effects(&effects_builder.effects);
 
@@ -1701,6 +1710,7 @@ pub fn execute_action(
                         global_sequence: net.global_action_sequence,
                         ..Default::default()
                     }));
+                action_global_sequence = net.global_action_sequence;
                 net.global_action_sequence += 1;
                 net.send_in_range_inclusive_instance(
                     from_actor_id,
@@ -1742,6 +1752,7 @@ pub fn execute_action(
                 if let Some(ipc_data) =
                     build_aoe_effect_packet(header, &all_targets, kawari::common::Position(center))
                 {
+                    action_global_sequence = net.global_action_sequence;
                     net.global_action_sequence += 1;
                     let ipc = ServerZoneIpcSegment::new(ipc_data);
                     net.send_in_range_inclusive_instance(
@@ -1892,13 +1903,13 @@ pub fn execute_action(
                 let shield = actor.shield_percent();
                 let ipc =
                     ServerZoneIpcSegment::new(ServerZoneIpcData::EffectResult(EffectResult {
-                        unk1: 1,
-                        unk2: 776386,
+                        count: 1,
+                        global_sequence: action_global_sequence,
                         target_id: from_actor_id,
                         health_points: current_common_spawn.health_points,
                         max_health_points: current_common_spawn.max_health_points,
                         resource_points: current_common_spawn.resource_points,
-                        class_id: current_common_spawn.class_job,
+                        classjob_id: current_common_spawn.class_job,
                         shield,
                         entry_count: num_self_entries,
                         statuses: self_entries,
@@ -1927,13 +1938,13 @@ pub fn execute_action(
 
                 let ipc =
                     ServerZoneIpcSegment::new(ServerZoneIpcData::EffectResult(EffectResult {
-                        unk1: 1,
-                        unk2: 776386,
+                        count: 1,
+                        global_sequence: action_global_sequence,
                         target_id: resolved_request.target.object_id,
                         health_points: target_common_spawn.health_points,
                         max_health_points: target_common_spawn.max_health_points,
                         resource_points: target_common_spawn.resource_points,
-                        class_id: target_common_spawn.class_job,
+                        classjob_id: target_common_spawn.class_job,
                         shield,
                         entry_count: num_target_entries,
                         statuses: target_entries,
@@ -2072,6 +2083,10 @@ pub fn execute_enemy_action(
 
         update_actor_hp_mp(network.clone(), instance, request.target.object_id);
 
+        // Quoted by the `EffectResult` below so the status changes are tied to this action. See the
+        // equivalent in `handle_action_messages`.
+        let action_global_sequence;
+
         {
             let mut network = network.lock();
 
@@ -2092,6 +2107,7 @@ pub fn execute_enemy_action(
                 global_sequence: network.global_action_sequence,
                 ..Default::default()
             }));
+            action_global_sequence = network.global_action_sequence;
             network.global_action_sequence += 1;
 
             network.send_in_range_inclusive_instance(
@@ -2139,17 +2155,16 @@ pub fn execute_enemy_action(
             let shield = actor.shield_percent();
 
             let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::EffectResult(EffectResult {
-                unk1: 1,
-                unk2: 776386,
+                count: 1,
+                global_sequence: action_global_sequence,
                 target_id: request.target.object_id,
                 health_points: target_common_spawn.health_points,
                 max_health_points: target_common_spawn.max_health_points,
                 resource_points: target_common_spawn.resource_points,
-                unk3: 0,
-                class_id: target_common_spawn.class_job,
+                target_index: 0,
+                classjob_id: target_common_spawn.class_job,
                 shield,
                 entry_count: num_entries,
-                unk4: 0,
                 statuses: entries,
             }));
             let mut network = network.lock();
