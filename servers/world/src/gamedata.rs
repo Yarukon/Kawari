@@ -66,6 +66,8 @@ use kawari::common::{LegacyEquipmentModelId, WeaponModelId, timestamp_secs};
 use kawari::config::get_config;
 use strum::FromRepr;
 
+use crate::inventory::{EquippedStorage, Storage};
+
 /// Convenient methods built on top of Physis to access data relevant to the server
 #[derive(Clone)]
 pub struct GameData {
@@ -152,6 +154,16 @@ pub struct ItemRow {
     /// Stat modifier stuff
     pub base_param_ids: [u8; 6],
     pub base_param_values: [i16; 6],
+
+    /// The item's `ItemSpecialBonus` row id. `1` is the high-quality stat bonus, which is what makes
+    /// `base_param_special_ids`/`base_param_special_values` apply.
+    pub item_special_bonus: u8,
+    /// The BaseParams boosted by `item_special_bonus`, paired with `base_param_special_values`.
+    pub base_param_special_ids: [u8; 6],
+    /// How much `item_special_bonus` adds to each of `base_param_special_ids`.
+    pub base_param_special_values: [i16; 6],
+    /// Which `BaseParam.MeldParam[]` column this item's meld caps use. Sheet range is 0-12.
+    pub base_param_modifier: u8,
 
     /// Physical defense.
     pub defense: u16,
@@ -323,8 +335,46 @@ impl CapSlot {
     }
 }
 
-/// The BaseParams that item level sync caps, and where each one's budget lives on an `ItemLevel`
-/// row. Anything absent here is left alone by the clamp.
+/// Which `BaseParam` `<Slot>Percent` column an `EquipSlotCategory` row id draws its budget from.
+///
+/// This deliberately does not go through [`CapSlot`]: that enum only models the 13 slots a player
+/// can equip something into, while EquipSlotCategory also covers the multi-slot categories (a
+/// body piece that also hides the head, and so on) that the meld cap needs. The order below is
+/// the column order of the BaseParam sheet, which is also EquipSlotCategory row order.
+fn percent_for_esc(base_param: &BaseParamRow, equip_slot_category: u8) -> Option<u16> {
+    Some(match equip_slot_category {
+        1 => base_param.OneHandWeaponPercent,
+        2 => base_param.OffHandPercent,
+        3 => base_param.HeadPercent,
+        4 => base_param.ChestPercent,
+        5 => base_param.HandsPercent,
+        6 => base_param.WaistPercent,
+        7 => base_param.LegsPercent,
+        8 => base_param.FeetPercent,
+        9 => base_param.EarringPercent,
+        10 => base_param.NecklacePercent,
+        11 => base_param.BraceletPercent,
+        12 => base_param.RingPercent,
+        13 => base_param.TwoHandWeaponPercent,
+        14 => base_param.UnderArmorPercent,
+        15 => base_param.ChestHeadPercent,
+        16 => base_param.ChestHeadLegsFeetPercent,
+        17 => base_param.Unknown0,
+        18 => base_param.LegsFeetPercent,
+        19 => base_param.HeadChestHandsLegsFeetPercent,
+        20 => base_param.ChestLegsGlovesPercent,
+        21 => base_param.ChestLegsFeetPercent,
+        22 => base_param.Unknown1,
+        23 => base_param.Unknown3,
+        _ => return None,
+    })
+}
+
+/// Where a BaseParam's budget lives on an `ItemLevel` row. Anything absent here has no budget at
+/// all, so item level sync leaves it alone and materia melded for it are capped at nothing.
+///
+/// Used both by [`ItemLevelCaps`] (through `SYNCED_BASE_PARAMS`, which is the smaller set that
+/// sync actually clamps) and by [`GameData::meld_cap`], which needs the DoH/DoL params too.
 fn item_level_budget(row: &ItemLevelRow, base_param_id: u8) -> Option<u16> {
     Some(match base_param_id {
         1 => row.Strength,
@@ -333,6 +383,8 @@ fn item_level_budget(row: &ItemLevelRow, base_param_id: u8) -> Option<u16> {
         4 => row.Intelligence,
         5 => row.Mind,
         6 => row.Piety,
+        10 => row.GP,
+        11 => row.CP,
         12 => row.PhysicalDamage,
         13 => row.MagicalDamage,
         19 => row.Tenacity,
@@ -343,6 +395,10 @@ fn item_level_budget(row: &ItemLevelRow, base_param_id: u8) -> Option<u16> {
         44 => row.Determination,
         45 => row.SkillSpeed,
         46 => row.SpellSpeed,
+        70 => row.Craftsmanship,
+        71 => row.Control,
+        72 => row.Gathering,
+        73 => row.Perception,
         _ => return None,
     })
 }
@@ -358,6 +414,52 @@ const SYNCED_BASE_PARAMS: [u8; 16] = [1, 2, 3, 4, 5, 6, 12, 13, 19, 21, 22, 24, 
 /// behavioural choice, and `test_cap_for_rounds_to_nearest` pins it.
 pub fn cap_for(budget: u16, percent: u16) -> u16 {
     (budget as f64 * percent as f64 / 1000.0).round() as u16
+}
+
+/// The most melded materia plus the item's own value may total for one BaseParam on one item:
+///
+/// ```text
+/// cap = (budget * percent * meld / 1000 + 50) / 100
+/// ```
+///
+/// where `budget` is `ItemLevel[the item's own item level][param]`, `percent` is that param's
+/// per-mille share of the item's EquipSlotCategory, and `meld` is
+/// `BaseParam[param].MeldParam[item.BaseParamModifier]`.
+///
+/// Both divisions truncate. The client computes them with 64-bit multiply-high magic constants,
+/// which plain truncating integer division reproduces exactly -- so this must stay integer
+/// arithmetic. Note this is *not* the same policy as [`cap_for`], which rounds; the `+ 50` here is
+/// the client's own rounding of the per-mille step, applied before the `/ 100`.
+pub fn meld_cap_for(budget: u16, percent: u16, meld: u8) -> u16 {
+    let cap = (budget as u64 * percent as u64 * meld as u64 / 1000 + 50) / 100;
+    cap.min(u16::MAX as u64) as u16
+}
+
+/// How much of a materia's raw value the meld cap lets through, given `running` -- how much of this
+/// BaseParam the item already provides, counting its own value and any materia in earlier meld
+/// slots. Zero once the item is at or over the cap.
+fn meld_grant(cap: u16, running: u32, raw: i16) -> u32 {
+    let headroom = (cap as u32).saturating_sub(running);
+    (raw.max(0) as u32).min(headroom)
+}
+
+/// Applies the meld cap to one item's materia for a single BaseParam and returns the total the
+/// materia are allowed to grant. `values` are the materia's raw values **in meld slot order**, and
+/// `own_value` is the item's own contribution to the param (its BaseParamValue plus, when it
+/// applies, the high-quality bonus).
+///
+/// Slot order is load-bearing: the cap applies to the running total, so an earlier materia eats the
+/// headroom a later one would have used. Two +54s under a cap of 348 on an item already granting
+/// 244 give 54 and then 50, not 54 and 54, and not 50 and 50.
+///
+/// The item's own value is never reduced by this -- an item already at its cap simply grants its
+/// materia nothing.
+pub fn trim_melded_values(cap: u16, own_value: u32, values: &[i16]) -> u32 {
+    let mut running = own_value;
+    for &raw in values {
+        running += meld_grant(cap, running, raw);
+    }
+    running - own_value
 }
 
 /// The most a single equipment slot may contribute to a BaseParam once its gear is synced down to
@@ -395,12 +497,16 @@ pub fn cap_for(budget: u16, percent: u16) -> u16 {
 #[derive(Debug, Default, Clone)]
 pub struct ItemLevelCaps {
     caps: HashMap<(CapSlot, u8), u16>,
+    item_level: u16,
 }
 
 impl ItemLevelCaps {
     /// Builds the whole table for `item_level` from the ItemLevel and BaseParam sheets.
     pub fn new(game_data: &mut GameData, item_level: u16) -> Self {
-        let mut caps = Self::default();
+        let mut caps = Self {
+            item_level,
+            ..Default::default()
+        };
 
         let Some(item_level_row) = game_data.item_level_sheet.row(item_level as u32) else {
             // An empty table clamps nothing, which silently hands back un-synced stats. Continue
@@ -437,6 +543,175 @@ impl ItemLevelCaps {
     /// The cap for `base_param_id` in `slot`, or `None` if that param isn't item level synced.
     pub fn get(&self, slot: CapSlot, base_param_id: u8) -> Option<u16> {
         self.caps.get(&(slot, base_param_id)).copied()
+    }
+
+    /// The item level everything is being synced down to. Only needed to tell whether an individual
+    /// item is actually being synced *down* -- an item at or below this item level is untouched, and
+    /// keeps its melded materia (see `BaseParameters::calculate_stat_across_all_items`).
+    pub fn item_level(&self) -> u16 {
+        self.item_level
+    }
+
+    /// Sets the synced item level. Used by `new`, and lets a caller build a table from plain values
+    /// without touching game data.
+    pub fn set_item_level(&mut self, item_level: u16) {
+        self.item_level = item_level;
+    }
+}
+
+/// What the materia melded into the player's equipped gear contribute, per equipment slot and
+/// BaseParam, with each item's meld cap already applied (see [`meld_cap_for`] and
+/// [`trim_melded_values`]).
+///
+/// Resolved from game data once per stat recalculation, like [`ItemLevelCaps`], so that the
+/// arithmetic in `BaseParameters::calculate_stat_across_all_items` stays plain data and unit
+/// testable. It is resolved fresh every time rather than baked onto the items at meld time on
+/// purpose: a cached copy would silently go stale the moment some other code path changed a
+/// meld without remembering to re-bake it.
+///
+/// The values here are entirely a property of the item -- the meld cap depends on the item's *own*
+/// item level, never on any level sync. Whether a synced-down item's materia count at all is
+/// decided by the caller.
+#[derive(Debug, Default, Clone)]
+pub struct MateriaStats {
+    contributions: HashMap<u16, Vec<(u8, u32)>>,
+}
+
+/// The two game-data lookups [`MateriaStats::new`] needs.
+///
+/// Exists purely as a seam: [`GameData`] implements it by reading the sheets, and a test can
+/// implement it with a plain table. Without it the whole resolution layer -- reading each materia's
+/// grade, grouping by BaseParam, applying the cap -- would only be reachable with a full game
+/// install, and a mix-up like indexing the Materia sheet by meld slot instead of by grade would go
+/// unnoticed.
+pub trait MateriaResolver {
+    /// The BaseParam a materia boosts and by how much. See [`GameData::get_materia_stat`].
+    fn materia_stat(&mut self, materia_row: u16, grade_index: u8) -> Option<(u8, i16)>;
+
+    /// The meld cap for one BaseParam on one item. See [`GameData::meld_cap`].
+    fn materia_meld_cap(
+        &mut self,
+        item_level: u16,
+        equip_slot_category: u8,
+        base_param_modifier: u8,
+        base_param_id: u8,
+    ) -> Option<u16>;
+}
+
+impl MateriaResolver for GameData {
+    fn materia_stat(&mut self, materia_row: u16, grade_index: u8) -> Option<(u8, i16)> {
+        self.get_materia_stat(materia_row, grade_index)
+    }
+
+    fn materia_meld_cap(
+        &mut self,
+        item_level: u16,
+        equip_slot_category: u8,
+        base_param_modifier: u8,
+        base_param_id: u8,
+    ) -> Option<u16> {
+        self.meld_cap(
+            item_level,
+            equip_slot_category,
+            base_param_modifier,
+            base_param_id,
+        )
+    }
+}
+
+impl MateriaStats {
+    /// Resolves every melded materia on `equipped` against the Materia, Item and BaseParam sheets.
+    pub fn new(resolver: &mut impl MateriaResolver, equipped: &EquippedStorage) -> Self {
+        let mut stats = Self::default();
+
+        for index in 0..equipped.max_slots() {
+            let item = equipped.get_slot(index as u16);
+            if item.is_empty_slot() {
+                continue;
+            }
+
+            // `item_level`, `equip_slot_category` and `base_param_modifier` are `#[serde(skip)]`
+            // fields filled in from the Item sheet, so an item built by a path that forgot to
+            // populate them would silently read as "no budget" and drop its materia rather than
+            // fail. Equipped gear always has an EquipSlotCategory and a non-zero item level.
+            debug_assert!(
+                item.item_level > 0 && item.equip_slot_category > 0,
+                "equipped item {} has unpopulated sheet fields (item_level {}, esc {}); \
+                 its melded materia would be silently dropped",
+                item.item_id,
+                item.item_level,
+                item.equip_slot_category,
+            );
+
+            // Resolve the melded materia to their BaseParams, grouped by param but keeping meld
+            // slot order within a param, because the cap is applied to a running total.
+            let mut melded: Vec<(u8, Vec<i16>)> = Vec::new();
+            for (meld_slot, &materia_row) in item.materia.iter().enumerate() {
+                if materia_row == 0 {
+                    continue;
+                }
+                let Some((base_param_id, value)) =
+                    resolver.materia_stat(materia_row, item.materia_grades[meld_slot])
+                else {
+                    continue;
+                };
+
+                match melded.iter_mut().find(|(id, _)| *id == base_param_id) {
+                    Some((_, values)) => values.push(value),
+                    None => melded.push((base_param_id, vec![value])),
+                }
+            }
+
+            if melded.is_empty() {
+                continue;
+            }
+
+            let own = item.base_param_contributions();
+
+            for (base_param_id, values) in melded {
+                // No budget for this param on this item means no headroom at all, which is what the
+                // client does too (`GetParameterMaxValue` returns 0). No materia that actually
+                // grants anything falls in here: the rows whose BaseParam has no item level budget
+                // -- the elemental and status resistances -- are all-zero in the Materia sheet, and
+                // `get_materia_stat` already discards those.
+                let Some(cap) = resolver.materia_meld_cap(
+                    item.item_level,
+                    item.equip_slot_category,
+                    item.base_param_modifier,
+                    base_param_id,
+                ) else {
+                    continue;
+                };
+
+                let own_value = own
+                    .iter()
+                    .find(|(id, _)| *id == base_param_id)
+                    .map_or(0, |(_, value)| (*value).max(0) as u32);
+
+                let granted = trim_melded_values(cap, own_value, &values);
+                if granted > 0 {
+                    stats.add(index as u16, base_param_id, granted);
+                }
+            }
+        }
+
+        stats
+    }
+
+    /// Records one already-trimmed contribution. Used by `new`, and lets a caller build a table from
+    /// plain values without touching game data.
+    pub fn add(&mut self, equip_slot_index: u16, base_param_id: u8, value: u32) {
+        self.contributions
+            .entry(equip_slot_index)
+            .or_default()
+            .push((base_param_id, value));
+    }
+
+    /// What the materia in one equipment slot contribute, as `(base_param_id, value)` pairs.
+    pub fn contributions_for(&self, equip_slot_index: u16) -> &[(u8, u32)] {
+        self.contributions
+            .get(&equip_slot_index)
+            .map_or(&[], |contributions| contributions.as_slice())
     }
 }
 
@@ -715,6 +990,10 @@ impl GameData {
                 classjob_category: matched_row.ClassJobCategory,
                 base_param_ids: matched_row.BaseParam,
                 base_param_values: matched_row.BaseParamValue,
+                item_special_bonus: matched_row.ItemSpecialBonus,
+                base_param_special_ids: matched_row.BaseParamSpecial,
+                base_param_special_values: matched_row.BaseParamValueSpecial,
+                base_param_modifier: matched_row.BaseParamModifier,
                 defense: matched_row.DefensePhys,
                 magic_defense: matched_row.DefenseMag,
                 weapon_damage_phys: matched_row.DamagePhys,
@@ -794,6 +1073,55 @@ impl GameData {
         let row = self.materia_sheet.row(materia_row as u32)?;
         let item_id = *row.Item.get(grade_index as usize)?;
         (item_id > 0).then_some(item_id as u32)
+    }
+
+    /// The BaseParam a materia boosts and by how much, for the materia identified by
+    /// `(Materia` row, grade index)`.
+    ///
+    /// A zero value reads as `None`, i.e. "this materia grants nothing". That is real game data
+    /// rather than a failed lookup — the meldable main-stat materia (`Materia` rows 2-6:
+    /// Strength, Dexterity, Vitality, Intelligence, Mind) have real `Item` ids but are zeroed out
+    /// at every grade, as are the old elemental and status resistance lines.
+    ///
+    /// Rows 39-43 are a *second*, non-zero set of main-stat rows (+2/+4/+6 at the first three
+    /// grades). They have no `Item` ids at all, so nothing can ever resolve to them and they never
+    /// reach this function in practice.
+    pub fn get_materia_stat(&self, materia_row: u16, grade_index: u8) -> Option<(u8, i16)> {
+        let row = self.materia_sheet.row(materia_row as u32)?;
+        let value = *row.Value.get(grade_index as usize)?;
+        (value != 0).then_some((row.BaseParam, value))
+    }
+
+    /// The meld cap for one BaseParam on one item, or `None` if the item has no budget for that
+    /// param at all (which means its materia for that param grant nothing).
+    ///
+    /// `item_level` is the item's **own** item level. This has nothing to do with level sync: a
+    /// synced-down item is not capped by this, its materia are dropped outright instead.
+    ///
+    /// Reproduces `Client::Game::InventoryItem::GetParameterMaxValue` (7.51h2 @ `0x140C4F070`),
+    /// including its range guards -- the client rejects anything outside BaseParam 1-73,
+    /// EquipSlotCategory 1-23 or `BaseParamModifier` 0-12 before touching the sheets.
+    pub fn meld_cap(
+        &mut self,
+        item_level: u16,
+        equip_slot_category: u8,
+        base_param_modifier: u8,
+        base_param_id: u8,
+    ) -> Option<u16> {
+        if !(1..=73).contains(&base_param_id)
+            || !(1..=23).contains(&equip_slot_category)
+            || base_param_modifier >= 13
+        {
+            return None;
+        }
+
+        let item_level_row = self.item_level_sheet.row(item_level as u32)?;
+        let budget = item_level_budget(&item_level_row, base_param_id)?;
+        let base_param = self.get_base_param(base_param_id as u16)?;
+        let percent = percent_for_esc(&base_param, equip_slot_category)?;
+        let meld = *base_param.MeldParam.get(base_param_modifier as usize)?;
+
+        Some(meld_cap_for(budget, percent, meld))
     }
 
     /// Gets the primary model ID for a given item ID.
@@ -2136,6 +2464,7 @@ impl Resource for SqPackResourceSpy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::Item;
 
     /// Pins rounding-to-nearest against truncation. Every expectation below is a real
     /// `(ItemLevel[il][param], BaseParam[param].<Slot>Percent)` pair read from the sheets, and the
@@ -2173,5 +2502,226 @@ mod tests {
     fn test_cap_for_full_share_is_the_whole_budget() {
         assert_eq!(cap_for(65, 1000), 65);
         assert_eq!(cap_for(139, 1000), 139);
+    }
+
+    /// The meld caps of item 42734 (新生王国精准长衣): `LevelItem` 700, `EquipSlotCategory` 4,
+    /// `BaseParamModifier` 4. Every input is read from the sheets — `ItemLevel[700]` gives Dexterity
+    /// 3714, Vitality 3798 and both Direct Hit Rate and Critical Hit 2576, and `ChestPercent` is
+    /// 135‰ on all four, with `MeldParam[4]` = 100.
+    ///
+    /// The item's own values are Dexterity 501, Vitality 513 and Direct Hit Rate 348, i.e. exactly
+    /// its caps — which is why melding those onto a fully budgeted item does nothing at all. Its
+    /// Critical Hit is 244, leaving 104 of headroom.
+    #[test]
+    fn test_meld_cap_for_matches_the_sheets() {
+        assert_eq!(meld_cap_for(3714, 135, 100), 501); // Dexterity
+        assert_eq!(meld_cap_for(3798, 135, 100), 513); // Vitality
+        assert_eq!(meld_cap_for(2576, 135, 100), 348); // Direct Hit Rate
+        assert_eq!(meld_cap_for(2576, 135, 100), 348); // Critical Hit
+    }
+
+    /// `MeldParam` is a real factor, not a constant: Piety is the one combat param whose column
+    /// isn't uniformly 100. `BaseParam[6].MeldParam` is
+    /// `[90, 70, 70, 70, 70, 70, 100, 70, 70, 100, 70, 70, 70]`, so a chest piece at il-740
+    /// (`ItemLevel[740].Piety` = 2840, `ChestPercent` 135‰) caps Piety at 383 with
+    /// `BaseParamModifier` 6 but only 268 with `BaseParamModifier` 4.
+    ///
+    /// Ignoring `MeldParam` — or reusing `cap_for`, which knows nothing about it — would give 383
+    /// for both.
+    #[test]
+    fn test_meld_cap_for_applies_the_meld_param() {
+        assert_eq!(meld_cap_for(2840, 135, 100), 383);
+        assert_eq!(meld_cap_for(2840, 135, 70), 268);
+    }
+
+    /// A 0‰ share leaves no room for materia at all, and neither does a param with no budget.
+    #[test]
+    fn test_meld_cap_for_zero_budget_is_zero() {
+        assert_eq!(meld_cap_for(2576, 0, 100), 0);
+        assert_eq!(meld_cap_for(0, 135, 100), 0);
+        assert_eq!(meld_cap_for(2576, 135, 0), 0);
+    }
+
+    /// Item 42734 (Critical Hit 244, cap 348) with two Critical Hit XII (`Materia` row 15,
+    /// `Value[11]` = 54) melded into it. The cap applies to the running total, so the first materia
+    /// grants its full 54 and the second only the remaining 50 — 104 in total, taking the item to
+    /// exactly its cap.
+    ///
+    /// Capping each materia individually would give 108, and refusing the whole of the second one
+    /// would give 54.
+    #[test]
+    fn test_trim_melded_values_caps_the_running_total() {
+        assert_eq!(trim_melded_values(348, 244, &[54, 54]), 104);
+
+        // The same, step by step: the second materia is the one that gets cut.
+        assert_eq!(meld_grant(348, 244, 54), 54);
+        assert_eq!(meld_grant(348, 244 + 54, 54), 50);
+    }
+
+    /// Item 42734's Direct Hit Rate is 348, which is already its cap, so a Direct Hit XII
+    /// (`Materia` row 14, `Value[11]` = 54) melded into it grants nothing. The item's own value is
+    /// never cut down to make room.
+    #[test]
+    fn test_trim_melded_values_at_cap_grants_nothing() {
+        assert_eq!(trim_melded_values(348, 348, &[54]), 0);
+        assert_eq!(trim_melded_values(348, 400, &[54]), 0);
+    }
+
+    /// BaseParam 27 is Critical Hit; `Materia` row 15 is the Critical Hit line.
+    const CRITICAL_HIT: u8 = 27;
+    const MATERIA_ROW_CRITICAL_HIT: u16 = 15;
+    /// `EquipSlot::Body`, the index `EquippedStorage::get_slot` uses for the chest piece.
+    const SLOT_BODY: u16 = 3;
+
+    /// Stands in for the Materia, ItemLevel and BaseParam sheets so the resolution half of
+    /// [`MateriaStats::new`] can be tested without a game install.
+    #[derive(Default)]
+    struct FakeSheets {
+        /// `(Materia row, grade index) -> (BaseParam, value)`, mirroring `get_materia_stat`.
+        materia: Vec<((u16, u8), (u8, i16))>,
+        /// The cap handed back for every param, or `None` for "this item has no budget".
+        cap: Option<u16>,
+        /// Every `(item level, EquipSlotCategory, BaseParamModifier, BaseParam)` asked for, so a
+        /// test can assert the item's *own* fields are what drives the cap lookup.
+        cap_queries: Vec<(u16, u8, u8, u8)>,
+    }
+
+    impl MateriaResolver for FakeSheets {
+        fn materia_stat(&mut self, materia_row: u16, grade_index: u8) -> Option<(u8, i16)> {
+            self.materia
+                .iter()
+                .find(|((row, grade), _)| *row == materia_row && *grade == grade_index)
+                .map(|(_, stat)| *stat)
+        }
+
+        fn materia_meld_cap(
+            &mut self,
+            item_level: u16,
+            equip_slot_category: u8,
+            base_param_modifier: u8,
+            base_param_id: u8,
+        ) -> Option<u16> {
+            self.cap_queries.push((
+                item_level,
+                equip_slot_category,
+                base_param_modifier,
+                base_param_id,
+            ));
+            self.cap
+        }
+    }
+
+    /// The Critical Hit materia line at two grades, 54 apart, so indexing it by the wrong number
+    /// produces a visibly different stat rather than a near miss.
+    fn critical_hit_sheets(cap: Option<u16>) -> FakeSheets {
+        FakeSheets {
+            materia: vec![
+                ((MATERIA_ROW_CRITICAL_HIT, 0), (CRITICAL_HIT, 5)),
+                ((MATERIA_ROW_CRITICAL_HIT, 11), (CRITICAL_HIT, 54)),
+            ],
+            cap,
+            ..Default::default()
+        }
+    }
+
+    /// Item 42734 (新生王国精准长衣): il-700 chest, `BaseParamModifier` 4, Critical Hit 244.
+    /// `materia`/`materia_grades` are filled in by the caller.
+    fn melded_chest(materia: [u16; 5], materia_grades: [u8; 5]) -> EquippedStorage {
+        EquippedStorage {
+            body: Item {
+                quantity: 1,
+                item_id: 42734,
+                item_level: 700,
+                equip_slot_category: 4,
+                base_param_modifier: 4,
+                base_param_ids: [CRITICAL_HIT, 0, 0, 0, 0, 0],
+                base_param_values: [244, 0, 0, 0, 0, 0],
+                materia,
+                materia_grades,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A materia's stat is read at *its grade*, not at its meld slot. The two are both small
+    /// integers and are trivially swapped, and swapping them silently changes every melded stat in
+    /// the game rather than failing: here a grade-11 materia in meld slot 0 would read the grade-0
+    /// row and grant 5 instead of 54.
+    #[test]
+    fn test_materia_stats_reads_the_materia_grade_not_the_meld_slot() {
+        let equipped = melded_chest([MATERIA_ROW_CRITICAL_HIT, 0, 0, 0, 0], [11, 0, 0, 0, 0]);
+
+        let stats = MateriaStats::new(&mut critical_hit_sheets(Some(348)), &equipped);
+
+        assert_eq!(stats.contributions_for(SLOT_BODY), [(CRITICAL_HIT, 54)]);
+    }
+
+    /// The meld cap is looked up from the item's own sheet-derived fields. Passing the wrong item
+    /// level, EquipSlotCategory or `BaseParamModifier` still produces a plausible-looking cap, so
+    /// the arguments are pinned explicitly.
+    #[test]
+    fn test_materia_stats_asks_for_the_cap_of_the_item_it_is_melded_into() {
+        let equipped = melded_chest([MATERIA_ROW_CRITICAL_HIT, 0, 0, 0, 0], [11, 0, 0, 0, 0]);
+
+        let mut sheets = critical_hit_sheets(Some(348));
+        MateriaStats::new(&mut sheets, &equipped);
+
+        // il-700, EquipSlotCategory 4, BaseParamModifier 4, BaseParam 27.
+        assert_eq!(sheets.cap_queries, [(700, 4, 4, CRITICAL_HIT)]);
+    }
+
+    /// Two materia of the same param share one cap: the running total starts at the item's own
+    /// value, so the first grants its full 54 and the second only the remaining 50.
+    ///
+    /// Seeding from the item's own value is the part that is easy to drop -- without it this would
+    /// come out as the full 108, and the item would end up 104 over its cap.
+    #[test]
+    fn test_materia_stats_caps_the_running_total_including_the_items_own_value() {
+        let equipped = melded_chest(
+            [MATERIA_ROW_CRITICAL_HIT, MATERIA_ROW_CRITICAL_HIT, 0, 0, 0],
+            [11, 11, 0, 0, 0],
+        );
+
+        let stats = MateriaStats::new(&mut critical_hit_sheets(Some(348)), &equipped);
+
+        // 244 own + 54 + 50 == the 348 cap.
+        assert_eq!(stats.contributions_for(SLOT_BODY), [(CRITICAL_HIT, 104)]);
+    }
+
+    /// A param the item has no budget for grants nothing at all, matching the client's
+    /// `GetParameterMaxValue` returning 0.
+    #[test]
+    fn test_materia_stats_without_a_budget_grant_nothing() {
+        let equipped = melded_chest([MATERIA_ROW_CRITICAL_HIT, 0, 0, 0, 0], [11, 0, 0, 0, 0]);
+
+        let stats = MateriaStats::new(&mut critical_hit_sheets(None), &equipped);
+
+        assert!(stats.contributions_for(SLOT_BODY).is_empty());
+    }
+
+    /// Contributions are keyed by the equipment slot they came from, because the caller decides
+    /// slot by slot whether an item's materia count at all (a synced-down item's do not).
+    #[test]
+    fn test_materia_stats_are_keyed_by_equipment_slot() {
+        let equipped = melded_chest([MATERIA_ROW_CRITICAL_HIT, 0, 0, 0, 0], [11, 0, 0, 0, 0]);
+
+        let stats = MateriaStats::new(&mut critical_hit_sheets(Some(348)), &equipped);
+
+        assert_eq!(stats.contributions_for(SLOT_BODY), [(CRITICAL_HIT, 54)]);
+        // EquipSlot::MainHand — empty, and nothing leaked into it.
+        assert!(stats.contributions_for(0).is_empty());
+    }
+
+    /// A materia the sheets know nothing about is skipped rather than defaulting to some param.
+    /// `get_materia_stat` also returns `None` for materia whose row is all zeroes (the main-stat
+    /// and resistance lines), which is the common case in real data.
+    #[test]
+    fn test_materia_stats_skip_materia_with_no_stat() {
+        let equipped = melded_chest([MATERIA_ROW_CRITICAL_HIT, 0, 0, 0, 0], [7, 0, 0, 0, 0]);
+
+        let stats = MateriaStats::new(&mut critical_hit_sheets(Some(348)), &equipped);
+
+        assert!(stats.contributions_for(SLOT_BODY).is_empty());
     }
 }
