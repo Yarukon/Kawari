@@ -63,7 +63,7 @@ since the owner cringes at the mere mention of `AI`.
 - [ ] 金碟小游戏？
 - [ ] 制作系统？
 - [ ] 采集系统？
-- [ ] 反正就是修一大堆跟真实服务器行为不一致的Bug
+- [ ] 反正就是修一大堆跟真实服务器行为不一致的Bug (Never ending)
 
 ## Known Issues / 已知问题
 - 疑似服务器未正确同步装备耐久度，导致排本客户端会出现部分装备耐久过低的提示。
