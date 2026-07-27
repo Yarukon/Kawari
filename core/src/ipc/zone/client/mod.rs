@@ -720,6 +720,9 @@ pub enum ClientZoneIpcData {
     DyeInformation(DyeInformation),
     MeldMateriaRequest(MeldMateriaRequest),
     SaveGlamourPlate(SaveGlamourPlate),
+    RequestRecruitingPartyCount {
+        unk1: [u8; 8], // empty, as far as i've seen
+    },
 }
 
 #[cfg(test)]

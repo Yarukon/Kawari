@@ -484,6 +484,31 @@ pub struct ExamineEquipEntry {
     pub stain1: u8, // +0x27
 }
 
+/// Entry in the `RecruitingPartyCount` packet. Parallel with `RecruitingPartyDetail`.
+#[binrw]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecruitingPartyEntry {
+    /// Unused by client; always 0. Likely alignment padding.
+    pub unk0: u32,
+    /// Category bitmap. Client extracts the lowest set bit's index as the category code:
+    /// 0=none, 1=roulette, 2=dungeon, 3=guildhest, 4=trial, 5=raid, 6=high-end,
+    /// 7=pvp, 8=gold-saucer, 9=critical-engagement, 10=treasure-hunt, 11=hunt,
+    /// 12=gathering, 13=deep-dungeon, 14=variant-dungeon, 15=criterion-dungeon.
+    pub category_bits: u32,
+}
+
+/// Detail in the `RecruitingPartyCount` packet. Parallel with `RecruitingPartyEntry`.
+#[binrw]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecruitingPartyDetail {
+    /// Row ID in ContentRoulette (if kind=1) or ContentFinderCondition (if kind=2).
+    pub content_id: u16,
+    /// 1 = ContentRoulette, 2 = ContentFinderCondition. Observed 0 for category code 10.
+    pub content_kind: u16,
+    /// Unused by client; always 0. Likely alignment padding.
+    pub unk4: u32,
+}
+
 #[opcode_data(ServerZoneIpcType)]
 #[binrw]
 #[br(import(magic: &ServerZoneIpcType, size: &u32))]
@@ -1993,6 +2018,19 @@ pub enum ServerZoneIpcData {
         #[brw(pad_after = 6)] // unused
         value: u8,
     },
+    RecruitingPartyCount {
+        /// Unused by client; always 0 in observed packets. May be server-side session ID.
+        page_id: u32,
+        /// Page sequence number (1-based). 0 indicates the final page.
+        more_pages: u16,
+        /// Number of recruiting entries in this page. Client scans entries [0..count).
+        /// An entry with category_bits=0 is category 0 ("none"), not an empty slot.
+        count: u16,
+        /// Category information for each entry. Parallel with `details`.
+        entries: [RecruitingPartyEntry; 60],
+        /// Content identification for each entry. Parallel with `entries`.
+        details: [RecruitingPartyDetail; 60],
+    },
 }
 
 /// Builds the pair of `(ContentFinderUpdate, ContentFinderFound)` packets that pop a duty on the
@@ -2055,6 +2093,69 @@ mod tests {
     #[test]
     fn portrait_banner_size() {
         crate::common::ensure_size::<PortraitBanner, 52>();
+    }
+
+    // Pins `RecruitingPartyCount` against a real retail capture: three recruits, at slots 5, 6 and
+    // 10, being ContentRoulette 5 (Expert), ContentRoulette 2 (Leveling) and ContentFinderCondition
+    // 4 (Sastasha). The two 60-element arrays are parallel, so a wrong element size or a swapped
+    // field would shift the non-zero slots and this round-trip would fail.
+    #[test]
+    fn recruiting_party_count_matches_retail_capture() {
+        use binrw::{BinRead, BinWrite};
+        use std::io::Cursor;
+
+        let mut wire = vec![0u8; 968];
+        // Header: page_id = 0, more_pages = 0 (final page), count = 16.
+        wire[6] = 0x10;
+        // entries[i].category_bits at 8 + i * 8 + 4.
+        wire[8 + 5 * 8 + 4] = 0x02;
+        wire[8 + 6 * 8 + 4] = 0x02;
+        wire[8 + 10 * 8 + 4] = 0x04;
+        // details[i] at 488 + i * 8: content_id (u16), content_kind (u16).
+        wire[488 + 5 * 8] = 5;
+        wire[488 + 5 * 8 + 2] = 1;
+        wire[488 + 6 * 8] = 2;
+        wire[488 + 6 * 8 + 2] = 1;
+        wire[488 + 10 * 8] = 4;
+        wire[488 + 10 * 8 + 2] = 2;
+
+        let mut cursor = Cursor::new(&wire);
+        let parsed = ServerZoneIpcData::read_le_args(
+            &mut cursor,
+            (&ServerZoneIpcType::RecruitingPartyCount, &968),
+        )
+        .unwrap();
+
+        let ServerZoneIpcData::RecruitingPartyCount {
+            more_pages,
+            count,
+            entries,
+            details,
+            ..
+        } = &parsed
+        else {
+            panic!("parsed as the wrong variant: {parsed:#?}");
+        };
+
+        assert_eq!(*more_pages, 0);
+        assert_eq!(*count, 16);
+        // The category code is the index of the lowest set bit: roulettes 1, dungeon 2.
+        assert_eq!(entries[5].category_bits.trailing_zeros(), 1);
+        assert_eq!(entries[6].category_bits.trailing_zeros(), 1);
+        assert_eq!(entries[10].category_bits.trailing_zeros(), 2);
+        assert_eq!((details[5].content_id, details[5].content_kind), (5, 1));
+        assert_eq!((details[6].content_id, details[6].content_kind), (2, 1));
+        assert_eq!((details[10].content_id, details[10].content_kind), (4, 2));
+        // Every other slot is empty, so the client's scan skips it.
+        assert!(
+            (0..60)
+                .filter(|i| ![5, 6, 10].contains(i))
+                .all(|i| entries[i].category_bits == 0 && details[i].content_id == 0)
+        );
+
+        let mut out = Cursor::new(Vec::new());
+        parsed.write_le(&mut out).unwrap();
+        assert_eq!(out.into_inner(), wire);
     }
 
     // The shared party portrait entry must serialize to exactly 176 bytes, wire-identical

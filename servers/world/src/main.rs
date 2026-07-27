@@ -26,7 +26,8 @@ use kawari::ipc::zone::{
 
 use kawari::ipc::zone::{
     Blacklist, BlacklistedCharacter, ClientTriggerCommand, ClientZoneIpcData, ClientZoneIpcSegment,
-    MeldMateriaRequest, ReadyCheckReply, ServerZoneIpcData, ServerZoneIpcSegment,
+    MeldMateriaRequest, ReadyCheckReply, RecruitingPartyDetail, RecruitingPartyEntry,
+    ServerZoneIpcData, ServerZoneIpcSegment,
 };
 
 use kawari::common::{CharacterMode, NETWORK_TIMEOUT, RECEIVE_BUFFER_SIZE};
@@ -3273,6 +3274,20 @@ async fn process_packet(
                                 param2: 0, param3: 0, param4: 0, param5: 0,
                             })
                             .await;
+                    }
+                    ClientZoneIpcData::RequestRecruitingPartyCount { .. } => {
+                        // We don't track party recruitment yet, so report a single empty final
+                        // page. more_pages = 0 marks it as the last one, and count = 0 tells the
+                        // client not to read any of the entry slots.
+                        let ipc =
+                            ServerZoneIpcSegment::new(ServerZoneIpcData::RecruitingPartyCount {
+                                page_id: 0,
+                                more_pages: 0,
+                                count: 0,
+                                entries: [RecruitingPartyEntry::default(); 60],
+                                details: [RecruitingPartyDetail::default(); 60],
+                            });
+                        connection.send_ipc_self(ipc).await;
                     }
                     ClientZoneIpcData::PingSync { timestamp, .. } => {
                         // this is *usually* sent in response, but not always
