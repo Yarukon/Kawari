@@ -31,6 +31,30 @@ const BASE_PARAM_MAGICAL_DAMAGE: u8 = 13;
 const BASE_PARAM_DEFENSE: u8 = 21;
 const BASE_PARAM_MAGIC_DEFENSE: u8 = 24;
 
+/// Base CP every Disciple of the Hand starts with, before gear and materia.
+///
+/// Flat: unlike HP and MP this does not grow with level, and no Excel sheet carries it -- not
+/// `ParamGrow`, not `ClassJob`. Confirmed against retail.
+const BASE_CP: u32 = 180;
+
+/// Base GP every Disciple of the Land starts with, before gear and materia.
+///
+/// Also flat and also absent from the sheets. Only GP *regeneration* scales with level (via the
+/// traits learned at 70/80/83), which is a separate mechanic and not this value.
+const BASE_GP: u32 = 400;
+
+/// `ClassJob` row ids of the Disciples of the Hand, whose resource bar is CP.
+///
+/// Carpenter through Culinarian, contiguous. Cross-checks in the sheet: `ClassJobCategory` 33 and
+/// `BattleClassIndex` -1. (`DohDolJobIndex` restarts at 0 for Miner, so it cannot tell the two
+/// Disciple families apart on its own.)
+const CLASSJOBS_DOH: std::ops::RangeInclusive<u8> = 8..=15;
+
+/// `ClassJob` row ids of the Disciples of the Land, whose resource bar is GP.
+///
+/// Miner, Botanist, Fisher. `ClassJobCategory` 32.
+const CLASSJOBS_DOL: std::ops::RangeInclusive<u8> = 16..=18;
+
 /// Adds `value` to `param_id`'s entry in an item's contribution list, creating it if absent.
 ///
 /// Used to fold the stats that live in their own Item columns into the same list as the BaseParam
@@ -813,6 +837,21 @@ pub struct DamageRollModifiers {
 }
 
 impl BaseParameters {
+    /// The resource pool the client shows in place of the MP bar for this job.
+    ///
+    /// `CommonSpawn::resource_points` is one polymorphic field: MP for a battle job, CP for a
+    /// Disciple of the Hand, GP for a Disciple of the Land. Sending `mp` unconditionally is what
+    /// made crafters and gatherers read 10000 -- `ParamGrow.MpModifier` -- on their CP/GP bar.
+    pub fn resource_points(&self) -> u32 {
+        if CLASSJOBS_DOH.contains(&self.classjob_id) {
+            self.cp
+        } else if CLASSJOBS_DOL.contains(&self.classjob_id) {
+            self.gp
+        } else {
+            self.mp
+        }
+    }
+
     pub fn get_mut(&mut self, index: u8) -> &mut u32 {
         match index {
             1 => &mut self.strength,
@@ -954,6 +993,14 @@ impl BaseParameters {
 
         // This is fixed and isn't modified by any items in retail, so it's safe to be set here.
         self.mp = param_grow.MpModifier as u32;
+
+        // Seeded for every job, not just the Disciples, which is what retail does: the values are
+        // sent for battle jobs too, the client simply never displays them. Gating on the job here
+        // would instead leave a stale zero behind whenever a character switched away from a
+        // Disciple. Gear and materia add to these through `get_mut` (BaseParam 10 and 11) exactly
+        // like any other stat.
+        self.cp = BASE_CP;
+        self.gp = BASE_GP;
     }
 
     // This should be called after item stat calculations.
@@ -2069,6 +2116,130 @@ mod tests {
     /// `ParamGrow[100]` — MAIN 440 > SUB 420, i.e. the crossover against level 54.
     fn param_grow_100() -> ParamGrowRow {
         param_grow(420, 2780, 4205)
+    }
+
+    /// Carpenter — the first Disciple of the Hand.
+    const CARPENTER: u8 = 8;
+    /// Culinarian — the last Disciple of the Hand.
+    const CULINARIAN: u8 = 15;
+    /// Miner — the first Disciple of the Land.
+    const MINER: u8 = 16;
+    /// Fisher — the last Disciple of the Land.
+    const FISHER: u8 = 18;
+
+    /// A Disciple's `ClassJob` modifiers. Crafters and gatherers all carry 100 for mana.
+    fn disciple_modifiers() -> Modifiers {
+        Modifiers {
+            hp: 100,
+            mp: 100,
+            strength: 90,
+            vitality: 105,
+            dexterity: 100,
+            intelligence: 90,
+            mind: 90,
+            piety: 100,
+        }
+    }
+
+    fn leveled(classjob_id: u8) -> BaseParameters {
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_based_on_level(
+            &no_attributes(),
+            100,
+            classjob_id,
+            &param_grow_100(),
+            &disciple_modifiers(),
+        );
+        base_parameters
+    }
+
+    /// Base CP and GP are seeded for every job, including battle jobs, which is what retail sends.
+    /// Gating them on the job would leave a stale zero behind on a job change.
+    ///
+    /// Neither value scales with level — only GP *regeneration* does — so both levels agree.
+    #[test]
+    fn test_base_cp_and_gp_are_seeded_for_every_job() {
+        for level in [54u32, 100] {
+            let param_grow = if level == 54 {
+                param_grow_54()
+            } else {
+                param_grow_100()
+            };
+            for classjob_id in [BARD, CARPENTER, MINER] {
+                let mut base_parameters = BaseParameters::default();
+                base_parameters.calculate_based_on_level(
+                    &no_attributes(),
+                    level,
+                    classjob_id,
+                    &param_grow,
+                    &disciple_modifiers(),
+                );
+
+                assert_eq!(base_parameters.cp, 180, "level {level} job {classjob_id} cp");
+                assert_eq!(base_parameters.gp, 400, "level {level} job {classjob_id} gp");
+            }
+        }
+    }
+
+    /// `resource_points` picks the pool the client actually draws in place of the MP bar. Returning
+    /// `mp` for a Disciple is the defect this fixes: it put `ParamGrow.MpModifier`, 10000, on every
+    /// crafter's and gatherer's CP/GP bar.
+    ///
+    /// Both Disciple ranges are checked at both ends, since they are contiguous id ranges and an
+    /// off-by-one would silently hand Culinarian or Fisher the wrong pool.
+    #[test]
+    fn test_resource_points_follows_the_jobs_own_pool() {
+        for classjob_id in [CARPENTER, CULINARIAN] {
+            let parameters = leveled(classjob_id);
+            assert_eq!(
+                parameters.resource_points(),
+                180,
+                "Disciple of the Hand {classjob_id} draws CP"
+            );
+        }
+
+        for classjob_id in [MINER, FISHER] {
+            let parameters = leveled(classjob_id);
+            assert_eq!(
+                parameters.resource_points(),
+                400,
+                "Disciple of the Land {classjob_id} draws GP"
+            );
+        }
+
+        // A battle job keeps MP, and the neighbours just outside both ranges must not be captured.
+        for classjob_id in [BARD, 7, 19] {
+            let parameters = leveled(classjob_id);
+            assert_eq!(
+                parameters.resource_points(),
+                10000,
+                "job {classjob_id} draws MP"
+            );
+        }
+    }
+
+    /// Gear and materia reach CP through the ordinary BaseParam path (id 11), on top of the base.
+    /// 661 Item rows carry BaseParam 11, so this is the normal case for crafting gear rather than
+    /// an edge case.
+    #[test]
+    fn test_gear_cp_adds_on_top_of_the_base() {
+        let equipped = EquippedStorage {
+            body: Item {
+                quantity: 1,
+                item_id: 1,
+                equip_slot_category: 4,
+                base_param_ids: [11, 0, 0, 0, 0, 0],
+                base_param_values: [24, 0, 0, 0, 0, 0],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut parameters = leveled(CARPENTER);
+        parameters.calculate_stat_across_all_items(&equipped, None, None);
+
+        assert_eq!(parameters.cp, 180 + 24);
+        assert_eq!(parameters.resource_points(), 204);
     }
 
     /// Crit, direct hit and determination each need a level base, exactly as the damage maths

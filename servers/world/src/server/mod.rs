@@ -857,6 +857,10 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
         // Natural regen. Only players regen passively (HP in and out of combat, plus MP). NPCs do
         // NOT naturally regen — out of combat they're snapped back to full by the existing deaggro
         // path, and in combat they only change HP via damage/heal effects.
+        //
+        // `max_mp` here is really `max_resource_points`, which is CP on a Disciple of the Hand and
+        // GP on a Disciple of the Land. Those two pools keep the MP percentage regen for now; their
+        // real mechanics (a flat 5 GP per tick, CP refilling when a craft ends) are not modelled.
         if is_player && cur_hp < max_hp {
             let frac = if in_combat {
                 HP_REGEN_COMBAT
@@ -3765,7 +3769,8 @@ pub async fn server_main_loop(
 
                         actor.get_common_spawn_mut().level = level;
                         actor.get_common_spawn_mut().max_health_points = new_parameters.hp;
-                        actor.get_common_spawn_mut().max_resource_points = new_parameters.mp as u16;
+                        actor.get_common_spawn_mut().max_resource_points =
+                            new_parameters.resource_points() as u16;
                         actor.get_common_spawn_mut().class_job = class_job;
 
                         if let NetworkedActor::Player { parameters, .. } = actor {
