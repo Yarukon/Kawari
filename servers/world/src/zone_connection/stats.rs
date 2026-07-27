@@ -2,7 +2,7 @@
 
 use crate::{
     GameData, ToServer, ZoneConnection,
-    gamedata::{Attributes, CapSlot, ItemLevelCaps, Modifiers},
+    gamedata::{Attributes, CapSlot, ItemLevelCaps, MateriaStats, Modifiers},
     inventory::{EquippedStorage, Storage},
     zone_connection::effective_level,
 };
@@ -30,6 +30,21 @@ const BASE_PARAM_PHYSICAL_DAMAGE: u8 = 12;
 const BASE_PARAM_MAGICAL_DAMAGE: u8 = 13;
 const BASE_PARAM_DEFENSE: u8 = 21;
 const BASE_PARAM_MAGIC_DEFENSE: u8 = 24;
+
+/// Adds `value` to `param_id`'s entry in an item's contribution list, creating it if absent.
+///
+/// Used to fold the stats that live in their own Item columns into the same list as the BaseParam
+/// array, so that item level sync clamps each param exactly once. Adding zero is a no-op, which
+/// keeps items that carry no defense or weapon damage out of the list entirely.
+fn merge_contribution(contributions: &mut Vec<(u8, i32)>, param_id: u8, value: i32) {
+    if param_id == 0 || value == 0 {
+        return;
+    }
+    match contributions.iter_mut().find(|(id, _)| *id == param_id) {
+        Some((_, total)) => *total += value,
+        None => contributions.push((param_id, value)),
+    }
+}
 
 const LEVEL_MODIFIERS: [LevelModifier; 101] = [
     LevelModifier {
@@ -1244,10 +1259,17 @@ impl BaseParameters {
     /// columns rather than in the BaseParam array — is capped at the most that slot could grant at
     /// the synced item level. Each stat is capped independently against its own BaseParam's
     /// budget, so an item may keep some stats untouched while others are cut.
+    ///
+    /// `materia` covers what the melded materia add on top, already trimmed to each item's meld cap
+    /// (see [`MateriaStats`]). The two rules are per item and mutually exclusive: an item that is
+    /// being synced *down* loses its materia entirely — they are not scaled and not capped, they
+    /// simply do not count — while an item that isn't synced keeps its materia at their full
+    /// trimmed value, which may legitimately push the slot's total past the synced cap.
     pub fn calculate_stat_across_all_items(
         &mut self,
         equipped: &EquippedStorage,
         item_level_caps: Option<&ItemLevelCaps>,
+        materia: Option<&MateriaStats>,
     ) {
         for i in 0..equipped.max_slots() {
             let slot = equipped.get_slot(i as u16);
@@ -1270,18 +1292,55 @@ impl BaseParameters {
                 }
             };
 
-            self.defense += sync(BASE_PARAM_DEFENSE, slot.defense as u32);
-            self.magic_defense += sync(BASE_PARAM_MAGIC_DEFENSE, slot.magic_defense as u32);
-            // Weapon base damage drives calc_physical/magical_damage; only the equipped
-            // weapon carries a non-zero value, so summing across slots is fine.
-            self.physical_damage +=
-                sync(BASE_PARAM_PHYSICAL_DAMAGE, slot.weapon_damage_phys as u32);
-            self.magic_damage += sync(BASE_PARAM_MAGICAL_DAMAGE, slot.weapon_damage_mag as u32);
+            // The item's own base params, with its high-quality bonus already summed in.
+            //
+            // Defense, magic defense and weapon damage live in their own Item columns rather than
+            // in the BaseParam array, but they are the same BaseParams to `get_mut` and to the
+            // sync clamp -- and an HQ bonus can target them through BaseParamSpecial. So they are
+            // merged in here and every param is clamped exactly once: `sync` caps what the item
+            // contributes to a param *as a whole*, and `min(a, cap) + min(b, cap)` is not
+            // `min(a + b, cap)`. Accumulating a param in two places would let an HQ item through
+            // at up to twice its synced cap.
+            //
+            // Merging is safe in both directions: no Item row carries 12/13/21/24 in the normal
+            // BaseParam array, so these four can never collide with an entry already in the list.
+            //
+            // Weapon base damage drives calc_physical/magical_damage; only the equipped weapon
+            // carries a non-zero value, so summing across slots is fine.
+            let mut contributions = slot.base_param_contributions();
+            merge_contribution(&mut contributions, BASE_PARAM_DEFENSE, slot.defense as i32);
+            merge_contribution(
+                &mut contributions,
+                BASE_PARAM_MAGIC_DEFENSE,
+                slot.magic_defense as i32,
+            );
+            merge_contribution(
+                &mut contributions,
+                BASE_PARAM_PHYSICAL_DAMAGE,
+                slot.weapon_damage_phys as i32,
+            );
+            merge_contribution(
+                &mut contributions,
+                BASE_PARAM_MAGICAL_DAMAGE,
+                slot.weapon_damage_mag as i32,
+            );
 
-            for (i, param_id) in slot.base_param_ids.iter().enumerate() {
-                if *param_id != 0 {
-                    let value = slot.base_param_values[i] as u32; // TODO: is there ever negative values?
-                    *self.get_mut(*param_id) += sync(*param_id, value);
+            for (param_id, value) in contributions {
+                // No Item row in the sheet carries a negative BaseParamValue, so this clamp only
+                // guards against a bad read rather than a real case.
+                let value = value.max(0) as u32;
+                *self.get_mut(param_id) += sync(param_id, value);
+            }
+
+            // Under item level sync a synced-down item's melded materia are dropped entirely --
+            // not scaled and not capped. An unsynced item's materia apply at their full
+            // already-trimmed value, which may legitimately exceed the sync cap, so they must
+            // NOT go through `sync`.
+            let synced_down =
+                item_level_caps.is_some_and(|caps| slot.item_level > caps.item_level());
+            if !synced_down && let Some(materia) = materia {
+                for (param_id, value) in materia.contributions_for(i as u16) {
+                    *self.get_mut(*param_id) += *value;
                 }
             }
         }
@@ -1410,6 +1469,10 @@ impl ZoneConnection {
         let item_level_caps =
             item_level_sync.map(|item_level| ItemLevelCaps::new(&mut game_data, item_level));
 
+        // Resolved fresh on every recalculation rather than cached on the items, so a meld can
+        // never be left describing stats the gear no longer grants.
+        let materia = MateriaStats::new(&mut *game_data, &self.player_data.inventory.equipped);
+
         let param_grow = game_data
             .get_param_grow(level as u32)
             .expect("Failed to read param grow");
@@ -1425,6 +1488,7 @@ impl ZoneConnection {
         base_parameters.calculate_stat_across_all_items(
             &self.player_data.inventory.equipped,
             item_level_caps.as_ref(),
+            Some(&materia),
         );
         base_parameters.calculate_potencies(level as u32, &param_grow, Some(&modifiers));
 
@@ -1445,6 +1509,9 @@ impl ZoneConnection {
 
         let level = self.current_level(&game_data);
 
+        // Nothing is synced here, so every item keeps its materia.
+        let materia = MateriaStats::new(&mut *game_data, &self.player_data.inventory.equipped);
+
         let param_grow = game_data
             .get_param_grow(level as u32)
             .expect("Failed to read param grow");
@@ -1457,7 +1524,11 @@ impl ZoneConnection {
             &param_grow,
             &modifiers,
         );
-        base_parameters.calculate_stat_across_all_items(&self.player_data.inventory.equipped, None);
+        base_parameters.calculate_stat_across_all_items(
+            &self.player_data.inventory.equipped,
+            None,
+            Some(&materia),
+        );
         base_parameters.calculate_potencies(level as u32, &param_grow, Some(&modifiers));
 
         base_parameters
@@ -1707,6 +1778,11 @@ mod tests {
 
     /// A gear piece carrying the four BaseParams a physical DPS cares about. `equip_slot_category`
     /// is the item's EquipSlotCategory row id.
+    ///
+    /// Note that `item_level` is left at 0, which is *below* every sync level — so a piece built by
+    /// this helper alone never counts as synced down and always keeps its materia. Any test about
+    /// sync-vs-materia has to set `item_level` explicitly, the way `il700_body_with_crit_materia`
+    /// does. The per-param clamping in `ItemLevelCaps` is unaffected either way.
     fn gear(
         equip_slot_category: u8,
         dexterity: i16,
@@ -1858,7 +1934,7 @@ mod tests {
     #[test]
     fn test_unsynced_gear_is_not_capped() {
         let mut base_parameters = BaseParameters::default();
-        base_parameters.calculate_stat_across_all_items(&il700_bard_set(), None);
+        base_parameters.calculate_stat_across_all_items(&il700_bard_set(), None, None);
 
         assert_eq!(base_parameters.dexterity, 3715);
         assert_eq!(base_parameters.vitality, 3797);
@@ -1886,7 +1962,11 @@ mod tests {
     #[test]
     fn test_synced_gear_is_capped_per_stat_and_slot() {
         let mut base_parameters = BaseParameters::default();
-        base_parameters.calculate_stat_across_all_items(&il700_bard_set(), Some(&il133_caps()));
+        base_parameters.calculate_stat_across_all_items(
+            &il700_bard_set(),
+            Some(&il133_caps()),
+            None,
+        );
 
         assert_eq!(base_parameters.dexterity, 390);
         assert_eq!(base_parameters.vitality, 415);
@@ -1908,7 +1988,7 @@ mod tests {
         };
 
         let mut base_parameters = BaseParameters::default();
-        base_parameters.calculate_stat_across_all_items(&equipped, Some(&il133_caps()));
+        base_parameters.calculate_stat_across_all_items(&equipped, Some(&il133_caps()), None);
 
         assert_eq!(base_parameters.physical_damage, 65);
     }
@@ -2277,13 +2357,171 @@ mod tests {
         };
 
         let mut base_parameters = BaseParameters::default();
-        base_parameters.calculate_stat_across_all_items(&one_handed, Some(&il133_caps()));
+        base_parameters.calculate_stat_across_all_items(&one_handed, Some(&il133_caps()), None);
 
         // round(391 * 100 / 1000) = 39, not the two-handed round(391 * 140 / 1000) = 55.
         assert_eq!(base_parameters.dexterity, 39);
         assert_eq!(base_parameters.vitality, 42);
         assert_eq!(base_parameters.critical_hit, 37);
         assert_eq!(base_parameters.determination, 37);
+    }
+
+    /// The il-700 chest piece from `il700_bard_set` (Critical Hit 244) with two Critical Hit XII
+    /// melded in. `MateriaStats` has already trimmed them against the item's own meld cap of 348,
+    /// so what reaches the stat calculation is a flat +104 on the chest slot.
+    fn il700_body_with_crit_materia() -> (EquippedStorage, MateriaStats) {
+        let equipped = EquippedStorage {
+            body: Item {
+                item_level: 700,
+                ..gear(4, 501, 513, 244, 348)
+            },
+            ..Default::default()
+        };
+
+        let mut materia = MateriaStats::default();
+        materia.add(EquipSlot::Body as u16, 27, 104);
+
+        (equipped, materia)
+    }
+
+    /// A cap table that only models Critical Hit on the chest slot, so a test can pick the sync item
+    /// level and the cap independently of any real item level's budget.
+    fn chest_crit_caps(item_level: u16, cap: u16) -> ItemLevelCaps {
+        let mut caps = ItemLevelCaps::default();
+        caps.set_item_level(item_level);
+        caps.set(CapSlot::Chest, 27, cap);
+        caps
+    }
+
+    /// Unsynced, materia simply add to the item's own value.
+    #[test]
+    fn test_materia_add_to_an_unsynced_item() {
+        let (equipped, materia) = il700_body_with_crit_materia();
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&equipped, None, Some(&materia));
+
+        assert_eq!(base_parameters.critical_hit, 244 + 104);
+    }
+
+    /// Syncing an item down drops its materia entirely — they are not scaled and not capped, they
+    /// stop counting. Only the item's own value comes through, clamped as usual.
+    #[test]
+    fn test_synced_down_item_loses_its_materia() {
+        let (equipped, materia) = il700_body_with_crit_materia();
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(
+            &equipped,
+            // The item is il-700, so a sync to il-600 syncs it down.
+            Some(&chest_crit_caps(600, 200)),
+            Some(&materia),
+        );
+
+        // Not 304 (materia added on top), and not 200 + something scaled: just the clamped item.
+        assert_eq!(base_parameters.critical_hit, 200);
+    }
+
+    /// An item at or below the synced item level isn't synced down, so it keeps its materia at their
+    /// full trimmed value — even though that takes the slot's total past what the sync would cap the
+    /// item itself to. The cap applies to the item, not to the melds.
+    #[test]
+    fn test_unsynced_item_keeps_its_materia_past_the_sync_cap() {
+        let (equipped, materia) = il700_body_with_crit_materia();
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(
+            &equipped,
+            Some(&chest_crit_caps(700, 200)),
+            Some(&materia),
+        );
+
+        assert_eq!(base_parameters.critical_hit, 200 + 104);
+    }
+
+    /// The high-quality bonus is part of the item's own value for a param, so it has to be summed
+    /// with the item's normal value *before* the sync clamp. Clamping the two separately would let
+    /// `min(244, 260) + min(30, 260)` = 274 through a cap of 260.
+    #[test]
+    fn test_hq_bonus_is_summed_before_the_sync_clamp() {
+        let hq_body = EquippedStorage {
+            body: Item {
+                item_level: 700,
+                // Bit 0 of item_flags is the HQ flag; ItemSpecialBonus 1 is the HQ stat bonus.
+                item_flags: 1,
+                item_special_bonus: 1,
+                base_param_special_ids: [27, 0, 0, 0, 0, 0],
+                base_param_special_values: [30, 0, 0, 0, 0, 0],
+                ..gear(4, 0, 0, 244, 0)
+            },
+            ..Default::default()
+        };
+
+        let mut unsynced = BaseParameters::default();
+        unsynced.calculate_stat_across_all_items(&hq_body, None, None);
+        assert_eq!(unsynced.critical_hit, 274);
+
+        let mut synced = BaseParameters::default();
+        synced.calculate_stat_across_all_items(&hq_body, Some(&chest_crit_caps(600, 260)), None);
+        assert_eq!(synced.critical_hit, 260);
+    }
+
+    /// The same item without the HQ flag doesn't get the bonus, even though it carries the columns.
+    #[test]
+    fn test_hq_bonus_only_applies_to_hq_items() {
+        let nq_body = EquippedStorage {
+            body: Item {
+                item_level: 700,
+                item_special_bonus: 1,
+                base_param_special_ids: [27, 0, 0, 0, 0, 0],
+                base_param_special_values: [30, 0, 0, 0, 0, 0],
+                ..gear(4, 0, 0, 244, 0)
+            },
+            ..Default::default()
+        };
+
+        let mut base_parameters = BaseParameters::default();
+        base_parameters.calculate_stat_across_all_items(&nq_body, None, None);
+
+        assert_eq!(base_parameters.critical_hit, 244);
+    }
+
+    /// Defense, magic defense and weapon damage live in their own Item columns rather than in the
+    /// BaseParam array — but an HQ bonus can still target those same BaseParams through
+    /// `BaseParamSpecial`. Both halves have to reach the sync clamp as one number.
+    ///
+    /// This is the case the crit-based HQ tests above cannot catch: BaseParam 27 has no dedicated
+    /// column, so it is only ever accumulated once and passes either way. 21/24/12/13 are the ids
+    /// that can be accumulated twice, and 7157 Item rows carry 21 or 24 in `BaseParamSpecial`.
+    #[test]
+    fn test_hq_bonus_on_a_dedicated_column_param_is_summed_before_the_sync_clamp() {
+        let hq_body = EquippedStorage {
+            body: Item {
+                item_level: 700,
+                // Bit 0 of item_flags is the HQ flag; ItemSpecialBonus 1 is the HQ stat bonus.
+                item_flags: 1,
+                item_special_bonus: 1,
+                defense: 127,
+                base_param_special_ids: [BASE_PARAM_DEFENSE, 0, 0, 0, 0, 0],
+                base_param_special_values: [14, 0, 0, 0, 0, 0],
+                ..gear(4, 0, 0, 0, 0)
+            },
+            ..Default::default()
+        };
+
+        let mut unsynced = BaseParameters::default();
+        unsynced.calculate_stat_across_all_items(&hq_body, None, None);
+        assert_eq!(unsynced.defense, 141);
+
+        let mut caps = ItemLevelCaps::default();
+        caps.set_item_level(700);
+        caps.set(CapSlot::Chest, BASE_PARAM_DEFENSE, 100);
+
+        let mut synced = BaseParameters::default();
+        synced.calculate_stat_across_all_items(&hq_body, Some(&caps), None);
+        // min(127 + 14, 100) == 100. Clamping the halves separately yields
+        // min(127, 100) + min(14, 100) == 114, inflating defense past its synced cap.
+        assert_eq!(synced.defense, 100);
     }
 
     #[test]

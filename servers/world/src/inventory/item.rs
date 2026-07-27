@@ -58,6 +58,16 @@ pub struct Item {
     pub base_param_ids: [u8; 6],
     #[serde(skip)]
     pub base_param_values: [i16; 6],
+    /// The item's `ItemSpecialBonus` row id; `1` is the high-quality stat bonus.
+    #[serde(skip)]
+    pub item_special_bonus: u8,
+    #[serde(skip)]
+    pub base_param_special_ids: [u8; 6],
+    #[serde(skip)]
+    pub base_param_special_values: [i16; 6],
+    /// Which `BaseParam.MeldParam[]` column this item's meld caps use.
+    #[serde(skip)]
+    pub base_param_modifier: u8,
     #[serde(skip)]
     pub defense: u16,
     #[serde(skip)]
@@ -94,12 +104,55 @@ impl Item {
             is_advanced_melding_permitted: item_info.is_advanced_melding_permitted,
             base_param_ids: item_info.base_param_ids,
             base_param_values: item_info.base_param_values,
+            item_special_bonus: item_info.item_special_bonus,
+            base_param_special_ids: item_info.base_param_special_ids,
+            base_param_special_values: item_info.base_param_special_values,
+            base_param_modifier: item_info.base_param_modifier,
             defense: item_info.defense,
             magic_defense: item_info.magic_defense,
             weapon_damage_phys: item_info.weapon_damage_phys,
             weapon_damage_mag: item_info.weapon_damage_mag,
             ..Default::default()
         }
+    }
+
+    /// This item's own contributions to its BaseParams, as `(base_param_id, value)` pairs, with the
+    /// high-quality bonus folded in when the item is HQ.
+    ///
+    /// The HQ bonus (`ItemSpecialBonus == 1`, values in `BaseParamValueSpecial`) is part of the
+    /// item's own value for a param, so it has to be *summed* here rather than added separately by
+    /// the caller: item level sync clamps an item's contribution to a param once, and
+    /// `min(a, cap) + min(b, cap)` is not `min(a + b, cap)`.
+    pub fn base_param_contributions(&self) -> Vec<(u8, i32)> {
+        /// `ItemSpecialBonus` row for the high-quality stat bonus.
+        const ITEM_SPECIAL_BONUS_HQ: u8 = 1;
+
+        let mut contributions: Vec<(u8, i32)> = Vec::new();
+        let mut add = |base_param_id: u8, value: i16| {
+            if base_param_id == 0 {
+                return;
+            }
+            match contributions
+                .iter_mut()
+                .find(|(id, _)| *id == base_param_id)
+            {
+                Some((_, total)) => *total += value as i32,
+                None => contributions.push((base_param_id, value as i32)),
+            }
+        };
+
+        for (i, &base_param_id) in self.base_param_ids.iter().enumerate() {
+            add(base_param_id, self.base_param_values[i]);
+        }
+
+        // Bit 0 of item_flags is the HQ flag.
+        if self.item_flags & 1 != 0 && self.item_special_bonus == ITEM_SPECIAL_BONUS_HQ {
+            for (i, &base_param_id) in self.base_param_special_ids.iter().enumerate() {
+                add(base_param_id, self.base_param_special_values[i]);
+            }
+        }
+
+        contributions
     }
 
     /// Returns the catalog ID of the glamour, if applicable.
