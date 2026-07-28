@@ -8,7 +8,7 @@ DOT_REFRESH_DURATION = 45.0
 function doAction(player, in_combo)
     effects = EffectsBuilder()
     -- Damage hit
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
 
     -- Refresh both DoTs by reapplying the statuses. The server refreshes same-status DoT slots.
     -- The script cannot read the enemy's DoT ids, so the caster's level picks which pair is active:

@@ -8,7 +8,7 @@ BARRAGE_STATUS = 128
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
     effects:lose_effect(HAWK_EYE_STATUS, 0)
     effects:lose_effect(BARRAGE_STATUS, 0)
 

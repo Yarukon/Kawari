@@ -10,7 +10,7 @@ DOT_POTENCY = 20
 function doAction(player, in_combo)
     effects = EffectsBuilder()
     -- Initial hit
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(INITIAL_POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(INITIAL_POTENCY))
     -- Apply DoT (physical damage over time)
     effects:gain_dot_physical(CAUSTIC_BITE_STATUS, 0, DOT_DURATION, DOT_POTENCY)
 

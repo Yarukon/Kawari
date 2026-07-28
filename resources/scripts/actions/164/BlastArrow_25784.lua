@@ -8,7 +8,7 @@ BLAST_ARROW_READY_STATUS_ALT = 3142
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(MAIN_POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(MAIN_POTENCY))
     effects:lose_effect(BLAST_ARROW_READY_STATUS, 0)
     effects:lose_effect(BLAST_ARROW_READY_STATUS_ALT, 0)
 

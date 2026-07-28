@@ -4,7 +4,7 @@ POTENCY = 220
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
 
     return effects
 end

@@ -10,7 +10,7 @@ function doAction(player, in_combo)
     if coda < 1 then coda = 1 end
     if coda > 3 then coda = 3 end
     local potency = POTENCY_BY_CODA[coda]
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
     effects:lose_effect(RADIANT_ENCORE_READY_STATUS, 0)
 
     return effects
