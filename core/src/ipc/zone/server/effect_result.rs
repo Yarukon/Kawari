@@ -24,7 +24,7 @@ pub struct EffectEntry {
 pub struct EffectResult {
     /// How many actors are covered by this packet.
     pub count: u32,
-    /// See ActionResult for more details.
+    /// See ActionEffect1 for more details.
     pub global_sequence: u32,
     pub target_id: ObjectId,
     /// Amount of health points.

@@ -39,7 +39,7 @@ pub struct ActionRequest {
     pub unk1: u8, // what?
     /// What kind of action is requested.
     pub action_type: ActionType,
-    /// Will show up again in the resulting `ActionResult`.
+    /// Will show up again in the resulting `ActionEffect1`.
     pub sequence: u16,
     #[br(map = read_quantized_rotation)]
     #[bw(map = write_quantized_rotation)]

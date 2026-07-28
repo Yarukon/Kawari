@@ -12,10 +12,10 @@ use kawari::{
         Position,
     },
     ipc::zone::{
-        ActionEffect, ActionResult, ActionType, ActorControlCategory, ActorControlSelf,
-        AoeEffect8, AoeEffectHeader, BattleNpcSubKind, CharacterDataFlag, CommonSpawn,
-        DamageElement, DamageKind, DamageType, DisplayFlag, EffectKind, ObjectKind,
-        ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc,
+        ActionEffect1, ActionType, ActorControlCategory, ActorControlSelf, AoeEffect8,
+        AoeEffectHeader, BattleNpcSubKind, CharacterDataFlag, CommonSpawn, DamageElement,
+        DamageKind, DamageType, DisplayFlag, ObjectKind, ServerZoneIpcData, ServerZoneIpcSegment,
+        SpawnNpc, TargetEffect, TargetEffectKind,
     },
 };
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, UserData, UserDataMethods, Value};
@@ -322,14 +322,14 @@ pub enum LuaDirectorTask {
         position: Position,
         rotation: f32,
     },
-    /// Send a single-target `ActionResult` carrying one bossmod-style effect (Knockback, Attract,
+    /// Send a single-target `ActionEffect1` carrying one bossmod-style effect (Knockback, Attract,
     /// AttractCustom, SetHP, Interrupt, ...). Purely a packet: no server-side state change. `source`
     /// defaults to `target` (animation source) and `action_id` defaults to 0.
     EmitEffect {
         target: ObjectId,
         source: Option<ObjectId>,
         action_id: u32,
-        effect: EffectKind,
+        effect: TargetEffectKind,
     },
     /// Directly set `target`'s HP (clamped to its max) and notify the client via both the `SetHP`
     /// effect (visual) and a normal HP sync packet.
@@ -1063,7 +1063,7 @@ impl UserData for LuaDirector {
                 target,
                 source: source.map(ObjectId),
                 action_id,
-                effect: EffectKind::Knockback {
+                effect: TargetEffectKind::Knockback {
                     extra_distance,
                     unk: [0; 4],
                     knockback_id,
@@ -1083,11 +1083,11 @@ impl UserData for LuaDirector {
             let source: Option<u32> = params.get("source")?;
             let action_id: u32 = params.get("action").unwrap_or(0);
             let effect = match variant {
-                2 => EffectKind::Attract2 {
+                2 => TargetEffectKind::Attract2 {
                     unk: [0; 5],
                     attract_id,
                 },
-                _ => EffectKind::Attract1 {
+                _ => TargetEffectKind::Attract1 {
                     unk: [0; 5],
                     attract_id,
                 },
@@ -1113,19 +1113,19 @@ impl UserData for LuaDirector {
             let source: Option<u32> = params.get("source")?;
             let action_id: u32 = params.get("action").unwrap_or(0);
             let effect = match variant {
-                2 => EffectKind::AttractCustom2 {
+                2 => TargetEffectKind::AttractCustom2 {
                     speed,
                     min_distance,
                     unk: [0; 3],
                     distance,
                 },
-                3 => EffectKind::AttractCustom3 {
+                3 => TargetEffectKind::AttractCustom3 {
                     speed,
                     min_distance,
                     unk: [0; 3],
                     distance,
                 },
-                _ => EffectKind::AttractCustom1 {
+                _ => TargetEffectKind::AttractCustom1 {
                     speed,
                     min_distance,
                     unk: [0; 3],
@@ -2673,7 +2673,7 @@ pub fn director_tick(
                     *target,
                     *target,
                     0,
-                    EffectKind::SetHP {
+                    TargetEffectKind::SetHP {
                         unk: [0; 5],
                         hp: applied_hp,
                     },
@@ -2700,7 +2700,7 @@ pub fn director_tick(
                     *target,
                     *target,
                     0,
-                    EffectKind::Interrupt {},
+                    TargetEffectKind::Interrupt {},
                 );
             }
         }
@@ -2718,7 +2718,7 @@ pub fn director_tick(
     pending_aoes
 }
 
-/// Send a single-target `ActionResult` carrying one bossmod-style effect (Knockback, Attract,
+/// Send a single-target `ActionEffect1` carrying one bossmod-style effect (Knockback, Attract,
 /// SetHP, Interrupt, ...), animated from `source_id` and sent to everyone in range of it (mirrors
 /// `resolve_aoe`'s `anim_source` pattern). Purely a packet — callers apply any server-side state
 /// change (HP, cast lock, ...) themselves before/after calling this.
@@ -2728,7 +2728,7 @@ fn send_single_effect(
     target: ObjectId,
     source_id: ObjectId,
     action_id: u32,
-    effect: EffectKind,
+    effect: TargetEffectKind,
 ) {
     let rotation = instance
         .find_actor(source_id)
@@ -2739,18 +2739,18 @@ fn send_single_effect(
         object_type: ObjectTypeKind::None,
     };
 
-    let mut effects = [ActionEffect::default(); 8];
-    effects[0] = ActionEffect { kind: effect };
+    let mut effects = [TargetEffect::default(); 8];
+    effects[0] = TargetEffect(effect);
 
     let mut network = network.lock();
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
         animation_target_id: target_type,
         target_id_again: target_type,
         action_id,
         animation_lock: ANIMATION_LOCK_TIME,
         rotation,
         spell_id: action_id as u16,
-        effect_count: 1,
+        target_count: 1,
         effects,
         action_type: ActionType::Action,
         global_sequence: network.global_action_sequence,
@@ -2835,19 +2835,17 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     }
 
     // Apply damage and accumulate enmity onto the source, building the per-target effect list.
-    let mut targets: Vec<(ObjectTypeId, ActionEffect)> = Vec::new();
+    let mut targets: Vec<(ObjectTypeId, TargetEffect)> = Vec::new();
     for target_id in &hit_players {
-        let effect = ActionEffect {
-            kind: EffectKind::Damage {
-                damage_kind: DamageKind::empty(),
-                damage_type: DamageType::Magic,
-                damage_element: DamageElement::Unaspected,
-                bonus_percent: 0,
-                unk3: 0,
-                unk4: 0,
-                amount: aoe.damage,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Damage {
+            damage_kind: DamageKind::empty(),
+            damage_type: DamageType::Magic,
+            damage_element: DamageElement::Unaspected,
+            bonus_percent: 0,
+            unk3: 0,
+            unk4: 0,
+            amount: aoe.damage,
+        });
 
         if let Some(target) = instance.find_actor_mut(*target_id) {
             target.apply_damage(aoe.damage);
@@ -2889,7 +2887,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     {
         let mut network = network.lock();
         let capped = &targets[..targets.len().min(8)];
-        let mut effects = [[ActionEffect::default(); 8]; 8];
+        let mut effects = [[TargetEffect::default(); 8]; 8];
         let mut target_ids = [ObjectTypeId::default(); 8];
         for (i, (target, effect)) in capped.iter().enumerate() {
             effects[i][0] = *effect;

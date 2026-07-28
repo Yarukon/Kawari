@@ -922,7 +922,7 @@ fn process_regen_tick(network: Arc<Mutex<NetworkState>>, instance: &mut Instance
 
     // Broadcast a floating damage/heal number above each target for every DoT/HoT tick this round.
     // Retail uses an ActorControl sourced from the *target* actor, carrying the amount and the
-    // caster id — this is what gives ticks their distinct number style (a plain ActionResult would
+    // caster id — this is what gives ticks their distinct number style (a plain ActionEffect1 would
     // render them like a normal action hit instead). DoT and HoT use different categories; the
     // owner status id is carried in param1. `unk2` still has multiple client branches and is
     // not fully identified.

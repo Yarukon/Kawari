@@ -31,10 +31,10 @@ use kawari::{
         ObjectTypeKind, Position,
     },
     ipc::zone::{
-        ActionEffect, ActionRequest, ActionResult, ActionType, ActorControlCategory,
-        BattleNpcSubKind, CharacterDataFlag, DamageElement, DamageType, DisplayFlag, EffectKind,
-        ObjectKind, ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect,
-        StatusEffectList,
+        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, BattleNpcSubKind,
+        CharacterDataFlag, DamageElement, DamageType, DisplayFlag, ObjectKind, ServerZoneIpcData,
+        ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect, StatusEffectList, TargetEffect,
+        TargetEffectKind,
     },
 };
 
@@ -407,7 +407,7 @@ pub(crate) fn is_elemental_primal_summon(action_id: u32) -> bool {
     elemental_primal_transition_for_action(action_id).is_some()
 }
 
-pub(crate) fn augment_action_result_effects(action_id: u32, effects: &mut Vec<ActionEffect>) {
+pub(crate) fn augment_action_result_effects(action_id: u32, effects: &mut Vec<TargetEffect>) {
     match action_id {
         ACTION_SUMMON_IFRIT_II => {
             insert_primal_summon_action_effect(effects, 1);
@@ -424,11 +424,11 @@ pub(crate) fn augment_action_result_effects(action_id: u32, effects: &mut Vec<Ac
     }
 }
 
-fn insert_primal_summon_action_effect(effects: &mut Vec<ActionEffect>, elemental_index: u8) {
+fn insert_primal_summon_action_effect(effects: &mut Vec<TargetEffect>, elemental_index: u8) {
     if effects.iter().any(|effect| {
         matches!(
-            effect.kind,
-            EffectKind::SummonPet {
+            effect.0,
+            TargetEffectKind::SummonPet {
                 unk: [index, 0, 0, 0, 128, 10, 1]
             } if index == elemental_index
         )
@@ -438,19 +438,17 @@ fn insert_primal_summon_action_effect(effects: &mut Vec<ActionEffect>, elemental
 
     insert_action_effect_before_combo(
         effects,
-        ActionEffect {
-            kind: EffectKind::SummonPet {
-                unk: [elemental_index, 0, 0, 0, 128, 10, 1],
-            },
-        },
+        TargetEffect(TargetEffectKind::SummonPet {
+            unk: [elemental_index, 0, 0, 0, 128, 10, 1],
+        }),
     );
 }
 
-fn insert_ready_status_action_effect(effects: &mut Vec<ActionEffect>, status_id: u16) {
+fn insert_ready_status_action_effect(effects: &mut Vec<TargetEffect>, status_id: u16) {
     if effects.iter().any(|effect| {
         matches!(
-            effect.kind,
-            EffectKind::GainEffectSelf {
+            effect.0,
+            TargetEffectKind::GainEffectSelf {
                 effect_id,
                 ..
             } if effect_id == status_id
@@ -461,23 +459,21 @@ fn insert_ready_status_action_effect(effects: &mut Vec<ActionEffect>, status_id:
 
     insert_action_effect_before_combo(
         effects,
-        ActionEffect {
-            kind: EffectKind::GainEffectSelf {
-                unk1: 0,
-                unk2: 0,
-                param: 0,
-                unk3: 128,
-                effect_id: status_id,
-                duration: 0.0,
-            },
-        },
+        TargetEffect(TargetEffectKind::GainEffectSelf {
+            unk1: 0,
+            unk2: 0,
+            param: 0,
+            unk3: 128,
+            effect_id: status_id,
+            duration: 0.0,
+        }),
     );
 }
 
-fn insert_action_effect_before_combo(effects: &mut Vec<ActionEffect>, effect: ActionEffect) {
+fn insert_action_effect_before_combo(effects: &mut Vec<TargetEffect>, effect: TargetEffect) {
     if effects.len() >= 8 {
         tracing::warn!(
-            "Skipping Summoner retail action effect because ActionResult already has {} effects",
+            "Skipping Summoner retail action effect because ActionEffect1 already has {} effects",
             effects.len()
         );
         return;
@@ -485,7 +481,7 @@ fn insert_action_effect_before_combo(effects: &mut Vec<ActionEffect>, effect: Ac
 
     let index = effects
         .iter()
-        .position(|effect| matches!(effect.kind, EffectKind::ExecuteCombo { .. }))
+        .position(|effect| matches!(effect.0, TargetEffectKind::ExecuteCombo { .. }))
         .unwrap_or(effects.len());
     effects.insert(index, effect);
 }
@@ -1404,28 +1400,24 @@ fn execute_summoner_pet_magic_attack(
         common.rotation = pet_rotation;
     }
 
-    let mut effects = [ActionEffect::default(); 8];
-    effects[0] = ActionEffect {
-        kind: EffectKind::Damage {
-            amount: damage,
-            damage_kind,
-            damage_type: DamageType::Magic,
-            damage_element: DamageElement::Unaspected,
-            bonus_percent: 0,
-            unk3: 0,
-            unk4: 0,
-        },
-    };
-    effects[1] = ActionEffect {
-        kind: EffectKind::ExecuteCombo {
-            sequence: 0,
-            unk2: 0,
-            unk3: 0,
-            unk4: 0,
-            unk5: 128,
-            action_id: action_id as u16,
-        },
-    };
+    let mut effects = [TargetEffect::default(); 8];
+    effects[0] = TargetEffect(TargetEffectKind::Damage {
+        amount: damage,
+        damage_kind,
+        damage_type: DamageType::Magic,
+        damage_element: DamageElement::Unaspected,
+        bonus_percent: 0,
+        unk3: 0,
+        unk4: 0,
+    });
+    effects[1] = TargetEffect(TargetEffectKind::ExecuteCombo {
+        sequence: 0,
+        unk2: 0,
+        unk3: 0,
+        unk4: 0,
+        unk5: 128,
+        action_id: action_id as u16,
+    });
 
     network.send_in_range_inclusive_instance(
         pet_id,
@@ -1441,7 +1433,7 @@ fn execute_summoner_pet_magic_attack(
         DestinationNetwork::ZoneClients,
     );
 
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
         animation_target_id: target,
         target_id_again: target,
         action_id,
@@ -1449,7 +1441,7 @@ fn execute_summoner_pet_magic_attack(
         rotation: pet_rotation,
         spell_id: action_id as u16,
         source_sequence: 0,
-        effect_count: 1,
+        target_count: 1,
         effects,
         action_type: ActionType::Action,
         global_sequence: network.global_action_sequence,
