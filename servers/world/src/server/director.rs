@@ -2839,7 +2839,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     for target_id in &hit_players {
         let effect = ActionEffect {
             kind: EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,

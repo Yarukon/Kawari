@@ -13,7 +13,7 @@ use kawari::{
     common::{HandlerType, WORLD_NAME},
     config::{FilesystemConfig, get_config},
     ipc::zone::{
-        Condition, DamageKind, DamageType, EventType, GameMasterRank, SceneFlags, ServerNoticeFlags,
+        Condition, DamageType, EventType, GameMasterRank, SceneFlags, ServerNoticeFlags,
     },
 };
 
@@ -41,7 +41,6 @@ impl KawariLua {
         Self::register_enum::<HandlerType>(&mut lua, "HANDLER_TYPE");
         Self::register_enum::<CurrencyKind>(&mut lua, "CURRENCY");
         Self::register_enum::<CrystalKind>(&mut lua, "CRYSTAL");
-        Self::register_enum::<DamageKind>(&mut lua, "DAMAGE_KIND");
         Self::register_enum::<DamageType>(&mut lua, "DAMAGE_TYPE");
         Self::register_enum::<Condition>(&mut lua, "CONDITION");
 

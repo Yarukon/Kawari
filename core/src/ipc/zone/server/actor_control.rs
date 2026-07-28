@@ -11,6 +11,19 @@ use crate::{
 };
 
 #[binrw]
+#[brw(repr = u32)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BaseStat {
+    Health = 1,
+    Mana = 3,
+    GatheringPoints = 7,
+    CraftingPoints = 8,
+}
+
+/// Value for `effect_kind` in `StatusEffectNotification` when a status was gained from another actor.
+pub const STATUS_NOTIFICATION_GAINED_FROM_OTHER: u32 = 0x0e;
+
+#[binrw]
 #[derive(Debug, PartialEq, Clone)]
 pub enum LiveEventType {
     /// "[Item] recorded in gathering log". Only prints the text, doesn't set the bitmask.
@@ -146,6 +159,10 @@ pub enum ActorControlCategory {
         unk3: u32,
     },
 
+    /// Does what it says!
+    #[brw(magic = 13u32)]
+    SetBaseStat { base_stat: BaseStat, amount: u32 },
+
     /// Kills this actor, including playing an animation and setting HP/MP to zero.
     /// Does *not* change the state of the actor.
     #[brw(magic = 14u32)]
@@ -197,6 +214,16 @@ pub enum ActorControlCategory {
     LoseEffect {
         effect_id: u32,
         unk2: u32,
+        source_actor_id: ObjectId,
+    },
+
+    #[brw(magic = 23u32)]
+    StatusEffectNotification {
+        effect_id: u32,
+        /// Dispatch kind read by StatusManager::ProcessHotDot. 0x0e = gained from another actor.
+        effect_kind: u32,
+        /// Repeats effect_id; retail does this on every observed cat 23.
+        effect_id_again: u32,
         source_actor_id: ObjectId,
     },
 

@@ -13,7 +13,7 @@ function doAction(player, in_combo)
     if player:get_effect(BARRAGE_STATUS) then
         potency = BARRAGE_POTENCY
     end
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
     effects:lose_effect(HAWK_EYE_STATUS, 0)
     effects:lose_effect(BARRAGE_STATUS, 0)
 

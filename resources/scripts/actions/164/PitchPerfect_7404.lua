@@ -11,7 +11,7 @@ function doAction(player, in_combo)
     if stacks < 1 then stacks = 1 end
     if stacks > 3 then stacks = 3 end
     local potency = POTENCY_BY_STACK[stacks]
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
     effects:lose_effect(REPERTOIRE_STATUS, 0)
 
     return effects

@@ -7,7 +7,7 @@ RESONANT_ARROW_READY_STATUS = 3862
 
 function doAction(player, in_combo)
     effects = EffectsBuilder()
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(POTENCY))
     effects:lose_effect(RESONANT_ARROW_READY_STATUS, 0)
 
     return effects

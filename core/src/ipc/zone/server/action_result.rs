@@ -47,41 +47,23 @@ fn encode_heal_params(amount: u32, params: [u8; 5]) -> [u8; 5] {
 }
 
 // TODO: this might be a flag?
+// This value is written verbatim into the effect's `param0` byte, where the client reads the
+// hit-severity flags: bit5 (0x20) = critical, bit6 (0x40) = direct hit (per the retail client
+// and ffxiv_bossmod's ActionEffect: `Param0 & 0x20` = crit, `Param0 & 0x40` = dhit).
 #[binrw]
-#[derive(
-    Debug, Eq, PartialEq, Clone, Copy, Default, Display, Deserialize, Serialize, EnumIter, FromRepr,
-)]
-#[repr(u8)]
-#[brw(repr = u8)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum DamageKind {
-    // This value is written verbatim into the effect's `param0` byte, where the client reads the
-    // hit-severity flags: bit5 (0x20) = critical, bit6 (0x40) = direct hit (per the retail client
-    // and ffxiv_bossmod's ActionEffect: `Param0 & 0x20` = crit, `Param0 & 0x40` = dhit). The plain
-    // ordinals 0/1/2/3 land in bits 0/1 instead, which the client never inspects, so every hit
-    // showed as Normal. The values below place the flags in the bits the client actually reads.
-    #[default]
-    Normal = 0x0,
-    Critical = 0x20,
-    DirectHit = 0x40,
-    /// Both a critical *and* a direct hit (param0 is a bitfield: crit 0x20 | direct hit 0x40).
-    CriticalDirectHit = 0x60,
-}
+#[derive(Eq, PartialEq, Clone, Copy, Default)]
+pub struct DamageKind(u8);
 
-#[cfg(feature = "server")]
-impl mlua::IntoLua for DamageKind {
-    fn into_lua(self, _: &mlua::Lua) -> mlua::Result<mlua::Value> {
-        Ok(mlua::Value::Integer(self as i64))
+bitflags! {
+    impl DamageKind: u8 {
+        const CRITICAL = 0x20;
+        const DIRECT_HIT = 0x40;
     }
 }
 
-#[cfg(feature = "server")]
-impl mlua::FromLua for DamageKind {
-    fn from_lua(value: mlua::Value, _: &mlua::Lua) -> mlua::Result<Self> {
-        match value {
-            mlua::Value::Integer(integer) => Ok(Self::from_repr(integer as u8).unwrap()),
-            _ => unreachable!(),
-        }
+impl std::fmt::Debug for DamageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        bitflags::parser::to_writer(self, f)
     }
 }
 
@@ -424,7 +406,7 @@ mod tests {
     fn action_effect_damage_uses_large_value_encoding() {
         let effect = ActionEffect {
             kind: EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,
@@ -449,7 +431,7 @@ mod tests {
         assert_eq!(
             parsed.kind,
             EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,
@@ -466,10 +448,10 @@ mod tests {
         // Guard against regressing DamageKind's repr back to plain 0/1/2/3 (which the client ignores,
         // making everything render as a Normal hit).
         let cases = [
-            (DamageKind::Normal, 0x00u8),
-            (DamageKind::Critical, 0x20u8),
-            (DamageKind::DirectHit, 0x40u8),
-            (DamageKind::CriticalDirectHit, 0x60u8),
+            (DamageKind::empty(), 0x00u8),
+            (DamageKind::CRITICAL, 0x20u8),
+            (DamageKind::DIRECT_HIT, 0x40u8),
+            (DamageKind::CRITICAL | DamageKind::DIRECT_HIT, 0x60u8),
         ];
         for (kind, expected_param0) in cases {
             let effect = ActionEffect {
@@ -738,7 +720,7 @@ mod tests {
         assert_eq!(
             action_result.effects[0].kind,
             EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Slashing,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,

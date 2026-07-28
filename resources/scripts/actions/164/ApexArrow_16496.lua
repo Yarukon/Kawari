@@ -11,7 +11,7 @@ function doAction(player, in_combo)
     effects = EffectsBuilder()
     local soul_voice = player:bard_soul_voice()
     local potency = SOUL_VOICE_POTENCY_PER_POINT * soul_voice
-    effects:damage(DAMAGE_KIND_NORMAL, DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
+    effects:damage(DAMAGE_TYPE_PIERCING, player.parameters:calc_physical_damage(potency))
 
     -- At level 86+, Apex Arrow grants Blast Arrow Ready
     if player:get_level() >= 86 then

@@ -18,11 +18,11 @@ bitflags! {
         /// Enables the Playguide window, and also the Duty Recorder. Only sent for the first zone logged into.
         const INITIAL_LOGIN = 0x001;
 
-        // TODO: no idea, I didn't find this in the disassembly so it may be unused/no effect. Set while in an instanced duty (explorer mode.)
-        const UNK1 = 0x002;
+        /// Only seen when in instanced content, and is required for other flags to take effect.
+        const INSTANCED_CONTENT = 0x002;
 
-        // TODO: I think this is for resetting the content finder queue info? This is set when returning from a duty.
-        const UNK2 = 0x004;
+        /// I think this is for resetting the content finder queue info? This is set when returning from a duty.
+        const RESET_CONTENTS_FINDER_QUEUE = 0x004;
 
         /// Hides the server information in the status bar and disables some social commands that only work in a World.
         const CROSS_WORLD = 0x008;
