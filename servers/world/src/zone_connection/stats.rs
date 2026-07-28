@@ -1192,7 +1192,7 @@ impl BaseParameters {
         modifiers: DamageRollModifiers,
     ) -> (u32, DamageKind) {
         if base == 0 {
-            return (0, DamageKind::Normal);
+            return (0, DamageKind::empty());
         }
 
         let level_modifier = level_modifier_for(u32::from(self.level));
@@ -1214,12 +1214,13 @@ impl BaseParameters {
         // Retail damage variance is a whole-percent roll from 95% through 105%.
         damage = apply_factor(damage, 95 + fastrand::u32(0..11), 100);
 
-        let kind = match (is_crit, is_direct) {
-            (true, true) => DamageKind::CriticalDirectHit,
-            (true, false) => DamageKind::Critical,
-            (false, true) => DamageKind::DirectHit,
-            (false, false) => DamageKind::Normal,
-        };
+        let mut kind = DamageKind::empty();
+        if is_crit {
+            kind |= DamageKind::CRITICAL;
+        }
+        if is_direct {
+            kind |= DamageKind::DIRECT_HIT;
+        }
 
         (damage.min(u64::from(u32::MAX)) as u32, kind)
     }

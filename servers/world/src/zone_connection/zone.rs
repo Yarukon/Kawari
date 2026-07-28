@@ -242,7 +242,7 @@ impl ZoneConnection {
             let mut flags = if initial_login {
                 ZoneInitFlags::INITIAL_LOGIN
             } else if bound_by_duty {
-                ZoneInitFlags::UNK1 | ZoneInitFlags::UNK3
+                ZoneInitFlags::INSTANCED_CONTENT | ZoneInitFlags::UNK3
             } else {
                 ZoneInitFlags::default()
             };

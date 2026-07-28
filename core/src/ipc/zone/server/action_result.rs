@@ -406,7 +406,7 @@ mod tests {
     fn action_effect_damage_uses_large_value_encoding() {
         let effect = ActionEffect {
             kind: EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(
             parsed.kind,
             EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,
@@ -448,10 +448,10 @@ mod tests {
         // Guard against regressing DamageKind's repr back to plain 0/1/2/3 (which the client ignores,
         // making everything render as a Normal hit).
         let cases = [
-            (DamageKind::Normal, 0x00u8),
-            (DamageKind::Critical, 0x20u8),
-            (DamageKind::DirectHit, 0x40u8),
-            (DamageKind::CriticalDirectHit, 0x60u8),
+            (DamageKind::empty(), 0x00u8),
+            (DamageKind::CRITICAL, 0x20u8),
+            (DamageKind::DIRECT_HIT, 0x40u8),
+            (DamageKind::CRITICAL | DamageKind::DIRECT_HIT, 0x60u8),
         ];
         for (kind, expected_param0) in cases {
             let effect = ActionEffect {
@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(
             action_result.effects[0].kind,
             EffectKind::Damage {
-                damage_kind: DamageKind::Normal,
+                damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Slashing,
                 damage_element: DamageElement::Unaspected,
                 bonus_percent: 0,
