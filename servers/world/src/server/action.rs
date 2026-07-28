@@ -32,9 +32,10 @@ use kawari::{
     },
     config::FilesystemConfig,
     ipc::zone::{
-        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, AoeEffect8, AoeEffect16,
-        AoeEffect24, AoeEffect32, AoeEffectHeader, DamageType, EffectEntry, EffectResult,
-        ServerZoneIpcData, ServerZoneIpcSegment, TargetEffect, TargetEffectKind,
+        ActionEffect1, ActionEffect8, ActionEffect16, ActionEffect24, ActionEffect32,
+        ActionEffectHeader, ActionRequest, ActionType, ActorControlCategory, DamageType,
+        EffectEntry, EffectResult, ServerZoneIpcData, ServerZoneIpcSegment, TargetEffect,
+        TargetEffectKind,
     },
 };
 
@@ -258,7 +259,7 @@ fn send_job_gauge_update(
     );
 }
 
-/// Maximum number of targets a single `AoeEffect32` packet can carry. Targets beyond this are
+/// Maximum number of targets a single `ActionEffect32` packet can carry. Targets beyond this are
 /// dropped (their damage is swallowed), matching how retail caps one effect packet.
 const MAX_AOE_TARGETS: usize = 32;
 
@@ -266,7 +267,7 @@ const MAX_AOE_TARGETS: usize = 32;
 /// its own 8-slot row. `targets` is `(target, effect)` pairs and must already be capped to
 /// [`MAX_AOE_TARGETS`]. Returns `None` if there are no targets.
 fn build_aoe_effect_packet(
-    header: AoeEffectHeader,
+    header: ActionEffectHeader,
     targets: &[(ObjectTypeId, TargetEffect)],
     center: kawari::common::Position,
 ) -> Option<ServerZoneIpcData> {
@@ -293,10 +294,10 @@ fn build_aoe_effect_packet(
     }
 
     Some(match targets.len() {
-        0..=8 => build_variant!(AoeEffect8, AoeEffect8, 8),
-        9..=16 => build_variant!(AoeEffect16, AoeEffect16, 16),
-        17..=24 => build_variant!(AoeEffect24, AoeEffect24, 24),
-        _ => build_variant!(AoeEffect32, AoeEffect32, 32),
+        0..=8 => build_variant!(ActionEffect8, ActionEffect8, 8),
+        9..=16 => build_variant!(ActionEffect16, ActionEffect16, 16),
+        17..=24 => build_variant!(ActionEffect24, ActionEffect24, 24),
+        _ => build_variant!(ActionEffect32, ActionEffect32, 32),
     })
 }
 
@@ -1808,7 +1809,7 @@ pub fn execute_action(
                 all_targets.extend(secondary_targets.iter().copied());
 
                 let mut net = network.lock();
-                let header = AoeEffectHeader {
+                let header = ActionEffectHeader {
                     animation_target_id: resolved_request.target,
                     action_id: resolved_request.action_id,
                     animation_lock: ANIMATION_LOCK_TIME,

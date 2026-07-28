@@ -64,7 +64,9 @@ pub use action_effect::{
 };
 
 mod aoe_effect;
-pub use aoe_effect::{AoeEffect8, AoeEffect16, AoeEffect24, AoeEffect32, AoeEffectHeader};
+pub use aoe_effect::{
+    ActionEffect8, ActionEffect16, ActionEffect24, ActionEffect32, ActionEffectHeader,
+};
 
 mod actor_set_pos;
 pub use actor_set_pos::{ActorSetPos, WarpType};
@@ -1387,10 +1389,10 @@ pub enum ServerZoneIpcData {
         unk3: u32,
         unk4: u32,
     },
-    AoeEffect8(Box<AoeEffect8>),
-    AoeEffect16(Box<AoeEffect16>),
-    AoeEffect24(Box<AoeEffect24>),
-    AoeEffect32(Box<AoeEffect32>),
+    ActionEffect8(Box<ActionEffect8>),
+    ActionEffect16(Box<ActionEffect16>),
+    ActionEffect24(Box<ActionEffect24>),
+    ActionEffect32(Box<ActionEffect32>),
     ActorCast {
         /// Usually the same as `action_id`.
         spell_id: u16,

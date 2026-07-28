@@ -12,8 +12,8 @@ use kawari::{
         Position,
     },
     ipc::zone::{
-        ActionEffect1, ActionType, ActorControlCategory, ActorControlSelf, AoeEffect8,
-        AoeEffectHeader, BattleNpcSubKind, CharacterDataFlag, CommonSpawn, DamageElement,
+        ActionEffect1, ActionEffect8, ActionEffectHeader, ActionType, ActorControlCategory,
+        ActorControlSelf, BattleNpcSubKind, CharacterDataFlag, CommonSpawn, DamageElement,
         DamageKind, DamageType, DisplayFlag, ObjectKind, ServerZoneIpcData, ServerZoneIpcSegment,
         SpawnNpc, TargetEffect, TargetEffectKind,
     },
@@ -2878,10 +2878,10 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
     };
     let anim_source = aoe.effect_source.unwrap_or(aoe.source_id);
 
-    // Send the result as an `AoeEffect8` — it's the only result packet with a `position` field, so
+    // Send the result as an `ActionEffect8` — it's the only result packet with a `position` field, so
     // the burst renders at the ground AoE centre (`aoe.origin`) regardless of the animation target.
     // Sourced from the off-arena omen helper so charge actions don't drag the boss. retail uses
-    // `animation_target = no-target` even for a HIT (verified vs a captured Eruption: AoeEffect8 with
+    // `animation_target = no-target` even for a HIT (verified vs a captured Eruption: ActionEffect8 with
     // animation_target 0xE0000000, the damage in the per-target effects, and the player confirmed by
     // a following EffectResultBasic). 0 hits also uses no-target — the position field draws the burst.
     {
@@ -2894,7 +2894,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
             target_ids[i] = *target;
         }
 
-        let header = AoeEffectHeader {
+        let header = ActionEffectHeader {
             animation_target_id: ObjectTypeId::default(), // no-target (0xE0000000), like retail
             action_id: aoe.action_id,
             global_sequence,
@@ -2906,7 +2906,7 @@ pub fn resolve_aoe(network: Arc<Mutex<NetworkState>>, instance: &mut Instance, a
             ..Default::default()
         };
 
-        let ipc = ServerZoneIpcData::AoeEffect8(Box::new(AoeEffect8 {
+        let ipc = ServerZoneIpcData::ActionEffect8(Box::new(ActionEffect8 {
             header,
             effects,
             target_ids,
