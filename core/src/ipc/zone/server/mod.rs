@@ -26,6 +26,7 @@ pub use player_stats::PlayerStats;
 mod actor_control;
 pub use actor_control::{
     ActorControl, ActorControlCategory, ActorControlSelf, ActorControlTarget, LiveEventType,
+    STATUS_NOTIFICATION_GAINED_FROM_OTHER,
 };
 
 mod zone_init;
