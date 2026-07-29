@@ -149,14 +149,41 @@ pub(crate) fn action_damage_modifiers(actor: Option<&NetworkedActor>) -> ActionD
     if actor_has_status(actor, STATUS_WANDERERS_MINUET) {
         modifiers.roll.crit_rate_bonus += 0.02;
     }
-    if actor_has_status(actor, STATUS_RADIANT_FINALE)
-        && let NetworkedActor::Player { combat_state, .. } = actor
+    // The bonus magnitude rides in the status param (set at grant time on both the caster's own
+    // GainEffectSelf and every propagated party copy), so any holder scales — not just the Bard
+    // whose combat_state carries the coda math.
+    if let Some(status) = actor
+        .status_effects()
+        .and_then(|s| s.get(STATUS_RADIANT_FINALE))
     {
-        modifiers.radiant_finale_bonus_percent =
-            combat_state.bard.radiant_finale_damage_bonus_percent;
+        modifiers.radiant_finale_bonus_percent = status.param as u8;
     }
 
     modifiers
+}
+
+/// Party members that should receive a caster's propagated party buff: every member whose actor is
+/// present as a Player in the caster's instance, excluding the caster.
+///
+/// `instance_player_ids` is the set of ObjectIds in the caster's instance that are
+/// `NetworkedActor::Player`; `party_member_ids` is `party.members[].actor_id` (order preserved).
+/// Returns recipients in party order, deduplicated, caster excluded.
+pub(crate) fn party_player_recipients(
+    caster: ObjectId,
+    party_member_ids: &[ObjectId],
+    instance_player_ids: &std::collections::HashSet<ObjectId>,
+) -> Vec<ObjectId> {
+    let mut recipients = Vec::new();
+    for &member in party_member_ids {
+        if member == caster
+            || !instance_player_ids.contains(&member)
+            || recipients.contains(&member)
+        {
+            continue;
+        }
+        recipients.push(member);
+    }
+    recipients
 }
 
 pub(crate) fn apply_target_player_mitigation(
@@ -1607,6 +1634,64 @@ pub fn execute_action(
                 None
             };
 
+            // Party raid-buff propagation (Battle Voice / Radiant Finale). Runs after the bard
+            // state update (which computed the coda bonus) and before the grant routing consumes
+            // status_grants. Coda bonus is 0 for Battle Voice, harmless.
+            let coda_bonus = if let Some(NetworkedActor::Player { combat_state, .. }) =
+                instance.find_actor(from_actor_id)
+            {
+                combat_state.bard.radiant_finale_damage_bonus_percent
+            } else {
+                0
+            };
+            if bard::is_bard(class_job)
+                && let Some((status_id, param, duration)) =
+                    bard::party_buff_for_action(resolved_request.action_id, coda_bonus)
+            {
+                // Radiant Finale only: stamp the coda bonus onto the caster's own GainEffectSelf
+                // entry so the param-based read-site scales the caster too. Battle Voice's self
+                // entry already has param 0, so guarding on the RF status id leaves it untouched.
+                if status_id == STATUS_RADIANT_FINALE {
+                    for effect in &mut effects_builder.effects {
+                        if let TargetEffectKind::GainEffectSelf {
+                            effect_id,
+                            param: self_param,
+                            ..
+                        } = &mut effect.0
+                            && *effect_id == status_id
+                        {
+                            *self_param = param;
+                        }
+                    }
+                }
+                // Every Player present in the caster's instance is a candidate recipient.
+                let instance_player_ids: std::collections::HashSet<ObjectId> = instance
+                    .actors
+                    .iter()
+                    .filter(|(_, actor)| matches!(actor, NetworkedActor::Player { .. }))
+                    .map(|(id, _)| *id)
+                    .collect();
+                // Snapshot the party members in a SHORT network-lock scope; do not hold the lock
+                // across the push loop (matches the party.rs broadcast helpers' discipline).
+                let member_ids: Vec<ObjectId> = {
+                    let network = network.lock();
+                    crate::server::party::get_party_id_from_actor_id(&network, from_actor_id)
+                        .and_then(|id| network.parties.get(&id))
+                        .map(|party| party.members.iter().map(|m| m.actor_id).collect())
+                        .unwrap_or_default()
+                };
+                for recipient in
+                    party_player_recipients(from_actor_id, &member_ids, &instance_player_ids)
+                {
+                    effects_builder.status_grants.push(StatusGrant {
+                        recipient,
+                        effect_id: status_id,
+                        param,
+                        duration,
+                    });
+                }
+            }
+
             if remove_cooldowns {
                 if let Some(actor) = instance.find_actor_mut(from_actor_id) {
                     let mut game_data = game_data.lock();
@@ -2915,5 +3000,71 @@ mod tests {
         let grants = [grant(partner, 1821), grant(partner, 1821)];
         let kept = grants_needing_actor_control(&grants, &[]);
         assert_eq!(kept.len(), 1);
+    }
+
+    fn player_id_set(ids: &[ObjectId]) -> std::collections::HashSet<ObjectId> {
+        ids.iter().copied().collect()
+    }
+
+    /// Recipients are the party members present as Players in the caster's instance, in party order,
+    /// with the caster excluded.
+    #[test]
+    fn party_recipients_are_present_players_excluding_caster() {
+        let caster = ObjectId(1);
+        let members = [caster, ObjectId(2), ObjectId(3)];
+        let present = player_id_set(&[caster, ObjectId(2), ObjectId(3)]);
+        let recipients = party_player_recipients(caster, &members, &present);
+        assert_eq!(recipients, vec![ObjectId(2), ObjectId(3)]);
+    }
+
+    /// A member who is not present in the caster's instance (offline / in another instance / an NPC,
+    /// i.e. absent from the Player id set) is excluded.
+    #[test]
+    fn party_recipients_exclude_members_not_in_instance() {
+        let caster = ObjectId(1);
+        let members = [caster, ObjectId(2), ObjectId(3)];
+        // Member 3 is not a present Player.
+        let present = player_id_set(&[caster, ObjectId(2)]);
+        let recipients = party_player_recipients(caster, &members, &present);
+        assert_eq!(recipients, vec![ObjectId(2)]);
+    }
+
+    /// Party order is preserved and duplicate member entries collapse to one recipient.
+    #[test]
+    fn party_recipients_preserve_order_and_dedup() {
+        let caster = ObjectId(1);
+        let members = [ObjectId(3), ObjectId(2), ObjectId(3)];
+        let present = player_id_set(&[ObjectId(2), ObjectId(3)]);
+        let recipients = party_player_recipients(caster, &members, &present);
+        assert_eq!(recipients, vec![ObjectId(3), ObjectId(2)]);
+    }
+
+    /// A solo caster (empty party) yields no recipients.
+    #[test]
+    fn party_recipients_empty_when_no_party() {
+        let caster = ObjectId(1);
+        let present = player_id_set(&[caster]);
+        let recipients = party_player_recipients(caster, &[], &present);
+        assert!(recipients.is_empty());
+    }
+
+    /// A 2964 status with param=6 yields +6% damage regardless of the actor's own Bard combat_state
+    /// (which is 0 for a fresh Player). This pins the read-site sourcing the bonus from the status
+    /// param, so a propagated Radiant Finale scales for a non-caster.
+    #[test]
+    fn radiant_finale_bonus_comes_from_status_param() {
+        let mut instance = Instance::default();
+        let actor_id = ObjectId(1);
+        instance.insert_empty_actor(actor_id);
+        if let Some(actor) = instance.find_actor_mut(actor_id)
+            && let Some(status_effects) = actor.status_effects_mut()
+        {
+            status_effects.add(STATUS_RADIANT_FINALE, 6, 20.0);
+        }
+
+        let actor = instance.find_actor(actor_id);
+        let modifiers = action_damage_modifiers(actor);
+        // 1000 base damage * (100 + 6)% = 1060.
+        assert_eq!(modifiers.apply_base_damage(1000), 1060);
     }
 }
