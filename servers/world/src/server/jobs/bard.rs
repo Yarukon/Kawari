@@ -66,6 +66,10 @@ const SONG_STATUSES: [u16; 3] = [
     STATUS_ARMYS_PAEON,
 ];
 
+// Party raid-buff statuses (propagated to party members; see `party_buff_for_action`).
+const STATUS_BATTLE_VOICE: u16 = 141;
+const STATUS_RADIANT_FINALE: u16 = 2964;
+
 // Song Proc Statuses
 const STATUS_REPERTOIRE: u16 = 3137; // Wanderer's Minuet proc - Pitch Perfect ready
 
@@ -238,6 +242,32 @@ impl BardState {
 /// Check if the given class_job is Bard
 pub(crate) fn is_bard(class_job: u8) -> bool {
     class_job == CLASSJOB_BARD || class_job == CLASSJOB_CATEGORY_BARD
+}
+
+/// Maps a Bard action to the party-propagatable status it grants, if any.
+///
+/// Returns `Some((status_id, param, duration_secs))` for exactly the two in-scope raid buffs;
+/// `None` for every other action (songs, Raging Strikes, Troubadour, Nature's Minne, Radiant
+/// Encore, damage skills, ...).
+///
+/// `radiant_finale_bonus_percent` is the freshly-computed coda bonus
+/// (`radiant_finale_damage_bonus_percent`, values 0/2/4/6) — it is only consumed for Radiant Finale
+/// and encoded into that status's `param`. Battle Voice ignores it and returns param 0.
+///
+/// Durations come from the Rust duration constants so the caster-own and party copies cannot drift.
+pub(crate) fn party_buff_for_action(
+    action_id: u32,
+    radiant_finale_bonus_percent: u8,
+) -> Option<(u16, u16, f32)> {
+    match action_id {
+        ACTION_BATTLE_VOICE => Some((STATUS_BATTLE_VOICE, 0, BATTLE_VOICE_DURATION.as_secs_f32())),
+        ACTION_RADIANT_FINALE => Some((
+            STATUS_RADIANT_FINALE,
+            radiant_finale_bonus_percent as u16,
+            RADIANT_FINALE_DURATION.as_secs_f32(),
+        )),
+        _ => None,
+    }
 }
 
 pub(crate) fn gauge_class_job_id() -> u8 {
@@ -1341,5 +1371,60 @@ mod tests {
         let song_flags = (data >> 56) as u8;
         assert_eq!(coda_byte, 3);
         assert_eq!(song_flags & SONG_FLAG_CODA_MASK, SONG_FLAG_CODA_MASK);
+    }
+
+    #[test]
+    fn battle_voice_is_a_party_buff_with_no_param() {
+        assert_eq!(
+            party_buff_for_action(ACTION_BATTLE_VOICE, 0),
+            Some((141, 0, 15.0))
+        );
+        // Battle Voice ignores the coda bonus entirely.
+        assert_eq!(
+            party_buff_for_action(ACTION_BATTLE_VOICE, 6),
+            Some((141, 0, 15.0))
+        );
+    }
+
+    #[test]
+    fn radiant_finale_carries_the_coda_bonus_in_param() {
+        assert_eq!(
+            party_buff_for_action(ACTION_RADIANT_FINALE, 6),
+            Some((2964, 6, 20.0))
+        );
+        assert_eq!(
+            party_buff_for_action(ACTION_RADIANT_FINALE, 4),
+            Some((2964, 4, 20.0))
+        );
+        assert_eq!(
+            party_buff_for_action(ACTION_RADIANT_FINALE, 2),
+            Some((2964, 2, 20.0))
+        );
+        assert_eq!(
+            party_buff_for_action(ACTION_RADIANT_FINALE, 0),
+            Some((2964, 0, 20.0))
+        );
+    }
+
+    #[test]
+    fn out_of_scope_actions_are_not_party_buffs() {
+        // Songs, Raging Strikes, Troubadour, Nature's Minne, Radiant Encore, and damage skills
+        // must all classify as None — only Battle Voice and Radiant Finale propagate.
+        for action_id in [
+            ACTION_WANDERERS_MINUET,
+            ACTION_MAGES_BALLAD,
+            ACTION_ARMYS_PAEON,
+            ACTION_RAGING_STRIKES,
+            ACTION_TROUBADOUR,
+            ACTION_NATURES_MINNE,
+            ACTION_RADIANT_ENCORE,
+            ACTION_HEAVY_SHOT,
+        ] {
+            assert_eq!(
+                party_buff_for_action(action_id, 6),
+                None,
+                "action {action_id}"
+            );
+        }
     }
 }
