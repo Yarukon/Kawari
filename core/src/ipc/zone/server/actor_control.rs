@@ -1447,3 +1447,39 @@ pub struct ActorControlTarget {
     pub category: ActorControlCategory,
     pub target: ObjectTypeId,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cat 23 (`StatusEffectNotification`) tells a recipient that another actor applied a status to
+    /// them. The wire layout must match the retail capture: magic 23 followed by
+    /// `[status_id, 0x0e, status_id, source_actor_id]` as little-endian u32s. Modelled on the
+    /// dance-partner capture (status 0x839, source 0x10022EF6).
+    #[test]
+    fn a_cat_23_notification_serializes_to_the_retail_wire_shape() {
+        use binrw::BinWrite;
+        use std::io::Cursor;
+
+        let category = ActorControlCategory::StatusEffectNotification {
+            effect_id: 0x839,
+            effect_kind: STATUS_NOTIFICATION_GAINED_FROM_OTHER,
+            effect_id_again: 0x839,
+            source_actor_id: ObjectId(0x10022EF6),
+        };
+
+        let mut cursor = Cursor::new(Vec::new());
+        category.write_le(&mut cursor).unwrap();
+
+        assert_eq!(
+            cursor.into_inner(),
+            vec![
+                0x17, 0, 0, 0, // magic 23
+                0x39, 0x08, 0, 0, // effect_id = 0x839
+                0x0e, 0, 0, 0, // effect_kind = gained from another actor
+                0x39, 0x08, 0, 0, // effect_id repeated
+                0xF6, 0x2E, 0x02, 0x10, // source_actor_id = 0x10022EF6
+            ]
+        );
+    }
+}

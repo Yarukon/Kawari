@@ -1,5 +1,7 @@
 mod effects_builder;
-pub use effects_builder::{EffectsBuilder, EnmityAction, GaugeAction, TickAction, TickKind};
+pub use effects_builder::{
+    EffectsBuilder, EnmityAction, GaugeAction, StatusGrant, TickAction, TickKind,
+};
 
 mod inventory;
 

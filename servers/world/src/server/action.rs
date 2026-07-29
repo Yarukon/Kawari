@@ -11,7 +11,7 @@ use crate::{
     ToServer,
     lua::{
         EffectsBuilder, EnmityAction, KawariLua, KawariLuaState, LuaContent, LuaPlayer, LuaZone,
-        TickKind,
+        StatusGrant, TickKind,
     },
     server::{
         WorldServer,
@@ -34,8 +34,8 @@ use kawari::{
     ipc::zone::{
         ActionEffect1, ActionEffect8, ActionEffect16, ActionEffect24, ActionEffect32,
         ActionEffectHeader, ActionRequest, ActionType, ActorControlCategory, DamageType,
-        EffectEntry, EffectResult, ServerZoneIpcData, ServerZoneIpcSegment, TargetEffect,
-        TargetEffectKind,
+        EffectEntry, EffectResult, STATUS_NOTIFICATION_GAINED_FROM_OTHER, ServerZoneIpcData,
+        ServerZoneIpcSegment, TargetEffect, TargetEffectKind,
     },
 };
 
@@ -359,6 +359,51 @@ fn target_action_result_effects(effects: &[TargetEffect]) -> [TargetEffect; 8] {
     }
 
     target_effects
+}
+
+/// The `(recipient, status_id)` pairs the outgoing effect array already notifies (path 1). Only the
+/// first `wire_effect_count` slots are considered, so entries dropped by the 8-slot cap are
+/// correctly absent. A `GainEffect` credits the action's `target`; a `GainEffectSelf` credits the
+/// `caster`. Pass `0` for the AoE branch, which writes no status entries.
+fn wire_notified_status_pairs(
+    effects: &[TargetEffect],
+    wire_effect_count: u8,
+    target: ObjectId,
+    caster: ObjectId,
+) -> Vec<(ObjectId, u16)> {
+    let mut pairs = Vec::new();
+    for effect in effects.iter().take(wire_effect_count as usize) {
+        match effect.0 {
+            TargetEffectKind::GainEffect { effect_id, .. } => pairs.push((target, effect_id)),
+            TargetEffectKind::GainEffectSelf { effect_id, .. } => pairs.push((caster, effect_id)),
+            _ => {}
+        }
+    }
+    pairs
+}
+
+/// Grants that still need path 2 (a cat 23 notification): deduplicated, and with any grant whose
+/// `(recipient, effect_id)` pair is already covered by the outgoing effect array (`notified`)
+/// removed, so no recipient is notified twice for the same status.
+fn grants_needing_actor_control(
+    grants: &[StatusGrant],
+    notified: &[(ObjectId, u16)],
+) -> Vec<StatusGrant> {
+    let mut kept: Vec<StatusGrant> = Vec::new();
+    for grant in grants {
+        let pair = (grant.recipient, grant.effect_id);
+        if notified.contains(&pair) {
+            continue;
+        }
+        if kept
+            .iter()
+            .any(|g| g.recipient == grant.recipient && g.effect_id == grant.effect_id)
+        {
+            continue;
+        }
+        kept.push(*grant);
+    }
+    kept
 }
 
 /// AoE damage falloff applied to *secondary* targets (the primary at slot 0 always takes full
@@ -1644,6 +1689,11 @@ pub fn execute_action(
         // one), in which case there is nothing for the client to correlate against anyway.
         let mut action_global_sequence = 0;
 
+        // The (recipient, status_id) pairs the outgoing effect array already notified via path 1.
+        // Populated only on the single-target path; the AoE builder writes no status entries, so it
+        // stays empty and every status_grant falls through to path 2 (cat 23).
+        let mut notified: Vec<(ObjectId, u16)> = Vec::new();
+
         {
             let effects = target_action_result_effects(&effects_builder.effects);
 
@@ -1766,6 +1816,18 @@ pub fn execute_action(
             if secondary_targets.is_empty() {
                 // Single target (or an AoE that hit nothing else): a plain ActionEffect1, carrying
                 // the primary's full effect set (damage, combo, gained buffs, ...).
+                // Record which (recipient, status) pairs this array notifies so status_grants that
+                // are already covered here are not also sent a cat 23 (path 2).
+                let wire_effect_count = effects
+                    .iter()
+                    .filter(|e| !matches!(e.0, TargetEffectKind::None))
+                    .count() as u8;
+                notified = wire_notified_status_pairs(
+                    &effects,
+                    wire_effect_count,
+                    resolved_request.target.object_id,
+                    from_actor_id,
+                );
                 let mut net = network.lock();
                 let ipc =
                     ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
@@ -2044,6 +2106,56 @@ pub fn execute_action(
                 );
             }
 
+            // Path 2: statuses granted to a recipient the effect array did not already notify (a
+            // party buff to a dance partner, an AoE self-buff dropped by the AoE builder, ...). Each
+            // surviving grant is applied server-side (inform_players: false) and announced with its
+            // own cat 23, but only when the recipient is a player -- retail never sends cat 23 to an
+            // enemy (PLAN F1 = B-narrowed).
+            let surviving_grants =
+                grants_needing_actor_control(&effects_builder.status_grants, &notified);
+            for grant in &surviving_grants {
+                gain_effect(
+                    network.clone(),
+                    data.clone(),
+                    ClientId::default(),
+                    grant.recipient,
+                    grant.effect_id,
+                    grant.param,
+                    grant.duration,
+                    from_actor_id,
+                    false,
+                );
+
+                let mut data = data.lock();
+                let Some(instance) = data.find_actor_instance_mut(grant.recipient) else {
+                    continue;
+                };
+                let is_player = matches!(
+                    instance.find_actor(grant.recipient),
+                    Some(NetworkedActor::Player { .. })
+                );
+                if !is_player {
+                    continue;
+                }
+                let ipc = if from_actor_id != grant.recipient {
+                    ActorControlCategory::StatusEffectNotification {
+                        effect_id: grant.effect_id as u32,
+                        effect_kind: STATUS_NOTIFICATION_GAINED_FROM_OTHER,
+                        effect_id_again: grant.effect_id as u32,
+                        source_actor_id: from_actor_id,
+                    }
+                } else {
+                    ActorControlCategory::GainEffect {
+                        effect_id: grant.effect_id as u32,
+                        param: grant.param as u32,
+                        source_actor_id: from_actor_id,
+                    }
+                };
+                network
+                    .lock()
+                    .send_ac_in_range_inclusive_instance(instance, grant.recipient, ipc);
+            }
+
             {
                 let mut data = data.lock();
                 if let Some(instance) = data.find_actor_instance_mut(from_actor_id) {
@@ -2055,6 +2167,17 @@ pub fn execute_action(
                             resolved_request.target.object_id,
                         );
                     }
+                }
+            }
+
+            // Path 2 changed each grant recipient's status list; flush each against its OWN instance
+            // (a third-party recipient need not share the caster's instance). send_dirty_status_effects
+            // is idempotent, so a recipient coinciding with the caster/target (already flushed above)
+            // no-ops here.
+            for grant in &surviving_grants {
+                let mut data = data.lock();
+                if let Some(instance) = data.find_actor_instance_mut(grant.recipient) {
+                    send_dirty_status_effects(network.clone(), instance, grant.recipient);
                 }
             }
         }
@@ -2710,5 +2833,87 @@ mod tests {
         let held = collect_held_lost_statuses(&instance, actor_id, &effects);
 
         assert_eq!(held, vec![BLAST_ARROW_READY]);
+    }
+
+    fn grant(recipient: ObjectId, effect_id: u16) -> StatusGrant {
+        StatusGrant {
+            recipient,
+            effect_id,
+            param: 0,
+            duration: 30.0,
+        }
+    }
+
+    /// A gain aimed at the action's target is attributed to that target, so the recipient is already
+    /// covered by the effect array (path 1) and must not also get a cat 23.
+    #[test]
+    fn a_targeted_gain_is_reported_as_notified() {
+        let (target, caster) = (ObjectId(10), ObjectId(20));
+        let effects = [gain_target(1821)];
+        let notified = wire_notified_status_pairs(&effects, 1, target, caster);
+        assert_eq!(notified, vec![(target, 1821)]);
+    }
+
+    /// A self gain is credited to the caster, not the target. A naive implementation that credited
+    /// the target would then also cat-23 the caster, double-notifying.
+    #[test]
+    fn a_self_gain_is_credited_to_the_caster() {
+        let (target, caster) = (ObjectId(10), ObjectId(20));
+        let effects = [gain_self(3867)];
+        let notified = wire_notified_status_pairs(&effects, 1, target, caster);
+        assert_eq!(notified, vec![(caster, 3867)]);
+    }
+
+    /// When the action is self-targeted (target == caster), a single gain yields exactly one pair,
+    /// so it can never double-notify however the entry was authored.
+    #[test]
+    fn a_self_targeted_action_yields_one_pair_per_status() {
+        let caster = ObjectId(20);
+        let effects = [gain_target(1821)];
+        let notified = wire_notified_status_pairs(&effects, 1, caster, caster);
+        assert_eq!(notified, vec![(caster, 1821)]);
+    }
+
+    /// Only the first `wire_effect_count` slots reach the wire. A 9th gain dropped by the 8-slot cap
+    /// is not notified via path 1, so it must fall through to path 2.
+    #[test]
+    fn an_entry_dropped_by_the_slot_cap_is_not_notified() {
+        let (target, caster) = (ObjectId(10), ObjectId(20));
+        let effects: Vec<TargetEffect> = (0..9).map(|i| gain_target(100 + i)).collect();
+        let notified = wire_notified_status_pairs(&effects, 8, target, caster);
+        assert_eq!(notified.len(), 8);
+        assert!(!notified.contains(&(target, 108)));
+    }
+
+    /// A grant to a third party (not in the wire's notified set) needs a cat 23 to reach them.
+    #[test]
+    fn a_grant_to_a_third_party_needs_an_actor_control() {
+        let partner = ObjectId(30);
+        let grants = [grant(partner, 1821)];
+        let notified = vec![(ObjectId(10), 1821)];
+        let kept = grants_needing_actor_control(&grants, &notified);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].recipient, partner);
+        assert_eq!(kept[0].effect_id, 1821);
+    }
+
+    /// A grant whose pair is already in the outgoing effect array must be dropped, or the recipient
+    /// is notified twice. This is the regression test for the rolled-back `inform_players` flip.
+    #[test]
+    fn a_grant_already_covered_by_the_packet_is_dropped() {
+        let target = ObjectId(10);
+        let grants = [grant(target, 1821)];
+        let notified = vec![(target, 1821)];
+        let kept = grants_needing_actor_control(&grants, &notified);
+        assert!(kept.is_empty());
+    }
+
+    /// The same grant twice (a script buffing one actor with one status in one action) notifies once.
+    #[test]
+    fn duplicate_grants_notify_once() {
+        let partner = ObjectId(30);
+        let grants = [grant(partner, 1821), grant(partner, 1821)];
+        let kept = grants_needing_actor_control(&grants, &[]);
+        assert_eq!(kept.len(), 1);
     }
 }

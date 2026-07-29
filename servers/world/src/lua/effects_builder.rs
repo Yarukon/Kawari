@@ -1,6 +1,18 @@
 use mlua::{FromLua, Lua, UserData, UserDataMethods, Value};
 
+use kawari::common::ObjectId;
 use kawari::ipc::zone::{DamageElement, DamageKind, DamageType, TargetEffect, TargetEffectKind};
+
+/// A status the action grants to a specific actor, who may be neither the action's target nor its
+/// caster (e.g. a party buff to a dance partner). Resolved in `execute_action` after the effect
+/// packet is built, so the routing invariant can see what the wire already covers.
+#[derive(Clone, Copy, Debug)]
+pub struct StatusGrant {
+    pub recipient: ObjectId,
+    pub effect_id: u16,
+    pub param: u16,
+    pub duration: f32,
+}
 
 /// A server-side enmity (hate) instruction produced by an action script.
 ///
@@ -74,6 +86,9 @@ pub struct EffectsBuilder {
     pub tick_actions: Vec<TickAction>,
     /// Server-side damage barriers to resolve once the action's target is known.
     pub barrier_actions: Vec<BarrierAction>,
+    /// Statuses granted to an explicit recipient who may be neither the target nor the caster.
+    /// Resolved in `execute_action` after the effect packet is built (see `StatusGrant`).
+    pub status_grants: Vec<StatusGrant>,
 }
 
 impl UserData for EffectsBuilder {
