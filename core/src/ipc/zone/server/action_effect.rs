@@ -69,7 +69,7 @@ impl std::fmt::Debug for DamageKind {
 
 #[binrw]
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
-pub enum EffectKind {
+pub enum TargetEffectKind {
     #[default]
     /// There's no effect entry.
     #[brw(magic = 0u8)]
@@ -252,15 +252,23 @@ pub enum EffectKind {
     /// really NoEffectText). Empty payload. Server must ALSO cancel the target's cast.
     #[brw(magic = 76u8)]
     Interrupt {},
-    /// The effect retail attaches to the Teleport action's `ActionResult` (effect type 0x3D / 61).
+    /// The effect retail attaches to the Teleport action's `ActionEffect1` (effect type 0x3D / 61).
     /// `territory` holds the destination TerritoryType. The client's per-target effect handler is a
     /// no-op for the base Teleport action, but retail always sends this so the action result is
-    /// well-formed (`effect_count = 1`); an empty result (`effect_count = 0`) leaves the teleport-out
+    /// well-formed (one populated effect slot); an empty result (no effects) leaves the teleport-out
     /// visuals unresolved (the caster stays stuck in the teleport animation). `unk` is zero in captures.
     #[brw(magic = 61u8)]
     Teleport { unk: [u8; 5], territory: u16 },
     /// Unknown effect (that should be added!)
-    Unknown { magic: u8, unk: [u8; 7] },
+    Unknown {
+        magic: u8,
+        param0: u8,
+        param1: u8,
+        param2: u8,
+        param3: u8,
+        param4: u8,
+        value: u16,
+    },
 }
 
 #[repr(u8)]
@@ -338,22 +346,19 @@ impl mlua::FromLua for DamageElement {
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ActionEffect {
-    #[brw(pad_size_to = 8)]
-    pub kind: EffectKind,
-}
+pub struct TargetEffect(#[brw(pad_size_to = 8)] pub TargetEffectKind);
 
 #[binrw]
 #[derive(Clone, Copy, Eq, PartialEq, Default)]
-pub struct ActionResultFlag(u8);
+pub struct ActionEffectFlag(u8);
 
 bitflags! {
-    impl ActionResultFlag : u8 {
+    impl ActionEffectFlag : u8 {
         const FORCE_ANIMATION_LOCK = 0x1;
     }
 }
 
-impl std::fmt::Debug for ActionResultFlag {
+impl std::fmt::Debug for ActionEffectFlag {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         bitflags::parser::to_writer(self, f)
     }
@@ -362,7 +367,7 @@ impl std::fmt::Debug for ActionResultFlag {
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Default)]
-pub struct ActionResult {
+pub struct ActionEffect1 {
     pub animation_target_id: ObjectTypeId,
     /// Index into the Action Excel sheet.
     pub action_id: u32,
@@ -381,11 +386,10 @@ pub struct ActionResult {
     pub animation_variation: u8,
     /// The kind of action.
     pub action_type: ActionType,
-    pub flags: ActionResultFlag,
-    pub effect_count: u8,
-    pub unk4: u16,
-    pub unk5: [u8; 6], // might be not read by the client?
-    pub effects: [ActionEffect; 8],
+    pub flags: ActionEffectFlag,
+    pub target_count: u8,
+    #[brw(pad_before = 8)] // not read?
+    pub effects: [TargetEffect; 8],
     #[brw(pad_before = 6, pad_after = 4)]
     pub target_id_again: ObjectTypeId,
 }
@@ -404,17 +408,15 @@ mod tests {
 
     #[test]
     fn action_effect_damage_uses_large_value_encoding() {
-        let effect = ActionEffect {
-            kind: EffectKind::Damage {
-                damage_kind: DamageKind::empty(),
-                damage_type: DamageType::Magic,
-                damage_element: DamageElement::Unaspected,
-                bonus_percent: 0,
-                unk3: 0,
-                unk4: 0,
-                amount: 70_000,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Damage {
+            damage_kind: DamageKind::empty(),
+            damage_type: DamageType::Magic,
+            damage_element: DamageElement::Unaspected,
+            bonus_percent: 0,
+            unk3: 0,
+            unk4: 0,
+            amount: 70_000,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -427,10 +429,10 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 4_464);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
         assert_eq!(
-            parsed.kind,
-            EffectKind::Damage {
+            parsed.0,
+            TargetEffectKind::Damage {
                 damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Magic,
                 damage_element: DamageElement::Unaspected,
@@ -454,34 +456,33 @@ mod tests {
             (DamageKind::CRITICAL | DamageKind::DIRECT_HIT, 0x60u8),
         ];
         for (kind, expected_param0) in cases {
-            let effect = ActionEffect {
-                kind: EffectKind::Damage {
-                    damage_kind: kind,
-                    damage_type: DamageType::Slashing,
-                    damage_element: DamageElement::Unaspected,
-                    bonus_percent: 0,
-                    unk3: 0,
-                    unk4: 0,
-                    amount: 100,
-                },
-            };
+            let effect = TargetEffect(TargetEffectKind::Damage {
+                damage_kind: kind,
+                damage_type: DamageType::Slashing,
+                damage_element: DamageElement::Unaspected,
+                bonus_percent: 0,
+                unk3: 0,
+                unk4: 0,
+                amount: 100,
+            });
             let mut writer = Cursor::new(Vec::new());
             effect.write_le(&mut writer).unwrap();
             let raw = writer.into_inner();
             assert_eq!(raw[0], 3, "effect magic");
-            assert_eq!(raw[1], expected_param0, "param0 severity flags for {kind:?}");
+            assert_eq!(
+                raw[1], expected_param0,
+                "param0 severity flags for {kind:?}"
+            );
         }
     }
 
     #[test]
     fn action_effect_knockback_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::Knockback {
-                extra_distance: 3,
-                unk: [0; 4],
-                knockback_id: 42,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Knockback {
+            extra_distance: 3,
+            unk: [0; 4],
+            knockback_id: 42,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -493,18 +494,16 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 42);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_attract1_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::Attract1 {
-                unk: [0; 5],
-                attract_id: 17,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Attract1 {
+            unk: [0; 5],
+            attract_id: 17,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -515,18 +514,16 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 17);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_attract2_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::Attract2 {
-                unk: [0; 5],
-                attract_id: 99,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Attract2 {
+            unk: [0; 5],
+            attract_id: 99,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -537,20 +534,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 99);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_attract_custom1_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::AttractCustom1 {
-                speed: 5,
-                min_distance: 1,
-                unk: [0; 3],
-                distance: 10,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::AttractCustom1 {
+            speed: 5,
+            min_distance: 1,
+            unk: [0; 3],
+            distance: 10,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -563,20 +558,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 10);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_attract_custom2_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::AttractCustom2 {
-                speed: 6,
-                min_distance: 2,
-                unk: [0; 3],
-                distance: 11,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::AttractCustom2 {
+            speed: 6,
+            min_distance: 2,
+            unk: [0; 3],
+            distance: 11,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -589,20 +582,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 11);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_attract_custom3_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::AttractCustom3 {
-                speed: 7,
-                min_distance: 3,
-                unk: [0; 3],
-                distance: 12,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::AttractCustom3 {
+            speed: 7,
+            min_distance: 3,
+            unk: [0; 3],
+            distance: 12,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -615,18 +606,13 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 12);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_set_hp_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::SetHP {
-                unk: [0; 5],
-                hp: 1,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::SetHP { unk: [0; 5], hp: 1 });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -637,15 +623,13 @@ mod tests {
         assert_eq!(u16::from_le_bytes([raw[6], raw[7]]), 1);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_interrupt_round_trip() {
-        let effect = ActionEffect {
-            kind: EffectKind::Interrupt {},
-        };
+        let effect = TargetEffect(TargetEffectKind::Interrupt {});
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -656,20 +640,18 @@ mod tests {
         assert_eq!(&raw[1..8], &[0u8; 7]);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
-        assert_eq!(parsed.kind, effect.kind);
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
+        assert_eq!(parsed.0, effect.0);
     }
 
     #[test]
     fn action_effect_teleport_matches_capture() {
-        // Golden bytes from a retail Teleport (action 5) ActionResult effect[0]: magic 0x3D (61),
+        // Golden bytes from a retail Teleport (action 5) ActionEffect1 effect[0]: magic 0x3D (61),
         // all params zero, destination territory 759 (0x02F7) in the trailing u16.
-        let effect = ActionEffect {
-            kind: EffectKind::Teleport {
-                unk: [0; 5],
-                territory: 759,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::Teleport {
+            unk: [0; 5],
+            territory: 759,
+        });
 
         let mut writer = Cursor::new(Vec::new());
         effect.write_le(&mut writer).unwrap();
@@ -679,10 +661,10 @@ mod tests {
         assert_eq!(raw, [0x3D, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7, 0x02]);
 
         let mut reader = Cursor::new(raw);
-        let parsed = ActionEffect::read_le(&mut reader).unwrap();
+        let parsed = TargetEffect::read_le(&mut reader).unwrap();
         assert_eq!(
-            parsed.kind,
-            EffectKind::Teleport {
+            parsed.0,
+            TargetEffectKind::Teleport {
                 unk: [0; 5],
                 territory: 759,
             }
@@ -697,7 +679,7 @@ mod tests {
         let buffer = read(d).unwrap();
         let mut buffer = Cursor::new(&buffer);
 
-        let action_result = ActionResult::read_le(&mut buffer).unwrap();
+        let action_result = ActionEffect1::read_le(&mut buffer).unwrap();
         assert_eq!(
             action_result.animation_target_id.object_id,
             ObjectId(0x40070E42)
@@ -710,16 +692,14 @@ mod tests {
         assert_eq!(action_result.rotation, 1.207309);
         assert_eq!(action_result.spell_id, 31);
         assert_eq!(action_result.animation_variation, 0);
-        assert_eq!(action_result.flags, ActionResultFlag::empty());
+        assert_eq!(action_result.flags, ActionEffectFlag::empty());
         assert_eq!(action_result.action_type, ActionType::Action);
-        assert_eq!(action_result.effect_count, 1);
-        assert_eq!(action_result.unk4, 0);
-        assert_eq!(action_result.unk5, [0; 6]);
+        assert_eq!(action_result.target_count, 1);
 
         // effect 0: attack
         assert_eq!(
-            action_result.effects[0].kind,
-            EffectKind::Damage {
+            action_result.effects[0].0,
+            TargetEffectKind::Damage {
                 damage_kind: DamageKind::empty(),
                 damage_type: DamageType::Slashing,
                 damage_element: DamageElement::Unaspected,
@@ -732,8 +712,8 @@ mod tests {
 
         // effect 1: start action combo
         assert_eq!(
-            action_result.effects[1].kind,
-            EffectKind::ExecuteCombo {
+            action_result.effects[1].0,
+            TargetEffectKind::ExecuteCombo {
                 sequence: 0,
                 unk2: 0,
                 unk3: 0,
@@ -757,7 +737,7 @@ mod tests {
         let buffer = read(d).unwrap();
         let mut buffer = Cursor::new(&buffer);
 
-        let action_result = ActionResult::read_le(&mut buffer).unwrap();
+        let action_result = ActionEffect1::read_le(&mut buffer).unwrap();
         assert_eq!(
             action_result.animation_target_id.object_id,
             ObjectId(277554542)
@@ -770,15 +750,13 @@ mod tests {
         assert_eq!(action_result.rotation, 2.6254003);
         assert_eq!(action_result.spell_id, 3);
         assert_eq!(action_result.animation_variation, 0);
-        assert_eq!(action_result.flags, ActionResultFlag::empty());
+        assert_eq!(action_result.flags, ActionEffectFlag::empty());
         assert_eq!(action_result.action_type, ActionType::Action);
-        assert_eq!(action_result.effect_count, 1);
-        assert_eq!(action_result.unk4, 0);
-        assert_eq!(action_result.unk5, [0; 6]);
+        assert_eq!(action_result.target_count, 1);
 
         assert_eq!(
-            action_result.effects[0].kind,
-            EffectKind::GainEffect {
+            action_result.effects[0].0,
+            TargetEffectKind::GainEffect {
                 unk1: 0,
                 unk2: 48,
                 unk3: 0,
@@ -799,7 +777,7 @@ mod tests {
         let buffer = read(d).unwrap();
         let mut buffer = Cursor::new(&buffer);
 
-        let action_result = ActionResult::read_le(&mut buffer).unwrap();
+        let action_result = ActionEffect1::read_le(&mut buffer).unwrap();
         assert_eq!(
             action_result.animation_target_id.object_id,
             ObjectId(277114100)
@@ -812,15 +790,13 @@ mod tests {
         assert_eq!(action_result.rotation, -0.8154669);
         assert_eq!(action_result.spell_id, 4);
         assert_eq!(action_result.animation_variation, 0);
-        assert_eq!(action_result.flags, ActionResultFlag::empty());
+        assert_eq!(action_result.flags, ActionEffectFlag::empty());
         assert_eq!(action_result.action_type, ActionType::Mount);
-        assert_eq!(action_result.effect_count, 1);
-        assert_eq!(action_result.unk4, 0);
-        assert_eq!(action_result.unk5, [0; 6]);
+        assert_eq!(action_result.target_count, 1);
 
         assert_eq!(
-            action_result.effects[0].kind,
-            EffectKind::Mount {
+            action_result.effects[0].0,
+            TargetEffectKind::Mount {
                 unk1: 1,
                 unk2: 0,
                 id: 55,
@@ -838,7 +814,7 @@ mod tests {
         let buffer = read(d).unwrap();
         let mut buffer = Cursor::new(&buffer);
 
-        let action_result = ActionResult::read_le(&mut buffer).unwrap();
+        let action_result = ActionEffect1::read_le(&mut buffer).unwrap();
         assert_eq!(
             action_result.animation_target_id.object_id,
             ObjectId(277114100)
@@ -851,15 +827,13 @@ mod tests {
         assert_eq!(action_result.rotation, -2.0225368);
         assert_eq!(action_result.spell_id, 13266);
         assert_eq!(action_result.animation_variation, 0);
-        assert_eq!(action_result.flags, ActionResultFlag::empty());
+        assert_eq!(action_result.flags, ActionEffectFlag::empty());
         assert_eq!(action_result.action_type, ActionType::Action);
-        assert_eq!(action_result.effect_count, 1);
-        assert_eq!(action_result.unk4, 0);
-        assert_eq!(action_result.unk5, [0; 6]);
+        assert_eq!(action_result.target_count, 1);
 
         assert_eq!(
-            action_result.effects[0].kind,
-            EffectKind::LoseEffect {
+            action_result.effects[0].0,
+            TargetEffectKind::LoseEffect {
                 param: 219,
                 unk: [0; 3],
                 effect_id: 565

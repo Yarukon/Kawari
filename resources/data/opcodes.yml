@@ -131,7 +131,7 @@ ServerZoneIpcType:
   comment: Update an actor's HP & MP values.
   opcode: 246
   size: 8
-- name: ActionResult
+- name: ActionEffect1
   comment: Results of an action, in response to ActionRequest.
   opcode: 499
   size: 124
@@ -535,19 +535,19 @@ ServerZoneIpcType:
   comment: Unknown purpose.
   opcode: 692
   size: 24
-- name: AoeEffect8
+- name: ActionEffect8
   comment: Unknown purpose.
   opcode: 276
   size: 636
-- name: AoeEffect16
+- name: ActionEffect16
   comment: Multi-target action effect (up to 16 targets).
   opcode: 717
   size: 1212
-- name: AoeEffect24
+- name: ActionEffect24
   comment: Multi-target action effect (up to 24 targets).
   opcode: 237
   size: 1788
-- name: AoeEffect32
+- name: ActionEffect32
   comment: Multi-target action effect (up to 32 targets).
   opcode: 711
   size: 2364

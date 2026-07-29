@@ -1,4 +1,4 @@
-//! Multi-target action-effect packets (`AoeEffect8/16/24/32`).
+//! Multi-target action-effect packets (`ActionEffect8/16/24/32`).
 //!
 //! These mirror the client's `ActionEffectN` structs (see ffxiv_bossmod `ServerIPC.cs`). A single
 //! packet carries up to N targets, each with its own 8-slot effect array (so e.g. damage numbers
@@ -8,8 +8,8 @@
 //!
 //! Wire layout (little-endian, `Pack = 1`):
 //! ```text
-//! AoeEffectHeader (42 bytes)
-//! effects:   [[ActionEffect; 8]; N]   (64 * N bytes)
+//! ActionEffectHeader (42 bytes)
+//! effects:   [[TargetEffect; 8]; N]   (64 * N bytes)
 //! padding3:  u16
 //! padding4:  u32
 //! target_ids:[ObjectTypeId; N]        (8 * N bytes)
@@ -27,14 +27,14 @@ use crate::common::{
 };
 use crate::ipc::zone::ActionType;
 
-use super::action_result::{ActionEffect, ActionResultFlag};
+use super::action_effect::{ActionEffectFlag, TargetEffect};
 
-/// The 42-byte header shared by every `AoeEffectN` packet. Field semantics match
-/// `ActionResult`/the client's `ActionEffectHeader`.
+/// The 42-byte header shared by every `ActionEffectN` packet. Field semantics match
+/// `ActionEffect1`/the client's `ActionEffectHeader`.
 #[binrw]
 #[brw(little)]
 #[derive(Debug, Clone, Default)]
-pub struct AoeEffectHeader {
+pub struct ActionEffectHeader {
     /// Who the animation targets (usually the primary/clicked target).
     pub animation_target_id: ObjectTypeId,
     /// Index into the Action Excel sheet.
@@ -53,24 +53,24 @@ pub struct AoeEffectHeader {
     pub spell_id: u16,
     pub animation_variation: u8,
     pub action_type: ActionType,
-    pub flags: ActionResultFlag,
+    pub flags: ActionEffectFlag,
     /// Number of populated target slots.
     #[brw(pad_after = 8)] // padding21..24
     pub target_count: u8,
 }
 
-/// Generates an `AoeEffectN` struct with a fixed `N`-target capacity.
+/// Generates an `ActionEffectN` struct with a fixed `N`-target capacity.
 macro_rules! aoe_effect_struct {
     ($name:ident, $n:expr) => {
         #[binrw]
         #[brw(little)]
         #[derive(Debug, Clone)]
         pub struct $name {
-            pub header: AoeEffectHeader,
+            pub header: ActionEffectHeader,
             /// Per-target effect rows; each target gets its own 8-slot effect array.
-            pub effects: [[ActionEffect; 8]; $n],
+            pub effects: [[TargetEffect; 8]; $n],
             // padding3 (u16) + padding4 (u32) — BOTH sit *before* target_ids (verified against a
-            // native AoeEffect8: the first target id starts 6 bytes after the effects array, with
+            // native ActionEffect8: the first target id starts 6 bytes after the effects array, with
             // the position field immediately following the target_ids). Splitting this as
             // 2-before/4-after shifted every target id 4 bytes early, so the client read target 0's
             // id from the padding (= 0 / no-target) and showed the hit as no-damage.
@@ -86,8 +86,8 @@ macro_rules! aoe_effect_struct {
         impl Default for $name {
             fn default() -> Self {
                 Self {
-                    header: AoeEffectHeader::default(),
-                    effects: [[ActionEffect::default(); 8]; $n],
+                    header: ActionEffectHeader::default(),
+                    effects: [[TargetEffect::default(); 8]; $n],
                     target_ids: [ObjectTypeId::default(); $n],
                     position: Position::default(),
                 }
@@ -96,7 +96,7 @@ macro_rules! aoe_effect_struct {
     };
 }
 
-aoe_effect_struct!(AoeEffect8, 8);
-aoe_effect_struct!(AoeEffect16, 16);
-aoe_effect_struct!(AoeEffect24, 24);
-aoe_effect_struct!(AoeEffect32, 32);
+aoe_effect_struct!(ActionEffect8, 8);
+aoe_effect_struct!(ActionEffect16, 16);
+aoe_effect_struct!(ActionEffect24, 24);
+aoe_effect_struct!(ActionEffect32, 32);

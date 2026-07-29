@@ -32,9 +32,10 @@ use kawari::{
     },
     config::FilesystemConfig,
     ipc::zone::{
-        ActionEffect, ActionRequest, ActionResult, ActionType, ActorControlCategory, AoeEffect8,
-        AoeEffect16, AoeEffect24, AoeEffect32, AoeEffectHeader, DamageType, EffectEntry,
-        EffectKind, EffectResult, ServerZoneIpcData, ServerZoneIpcSegment,
+        ActionEffect1, ActionEffect8, ActionEffect16, ActionEffect24, ActionEffect32,
+        ActionEffectHeader, ActionRequest, ActionType, ActorControlCategory, DamageType,
+        EffectEntry, EffectResult, ServerZoneIpcData, ServerZoneIpcSegment, TargetEffect,
+        TargetEffectKind,
     },
 };
 
@@ -84,7 +85,7 @@ const MOUNT_CAST_CENTISEC: u32 = 100;
 
 /// Localhost responses can arrive before the client-side action hook finishes recording
 /// `LastUsedActionSequence`. Retail always has at least network/server latency here; keep a small
-/// delay so ActionEffect.SourceSequence can be matched without falling back to the 300ms task tick.
+/// delay so TargetEffect.SourceSequence can be matched without falling back to the 300ms task tick.
 /// This is not intended to emulate RTT; it just needs to be long enough for the client to finish
 /// request bookkeeping before the action-effect packet is processed.
 const INSTANT_ACTION_RESPONSE_DELAY: Duration = Duration::from_millis(10);
@@ -182,7 +183,7 @@ pub(crate) fn apply_target_player_mitigation(
 fn collect_held_lost_statuses(
     instance: &Instance,
     actor_id: ObjectId,
-    effects: &[ActionEffect],
+    effects: &[TargetEffect],
 ) -> Vec<u16> {
     let Some(actor) = instance.find_actor(actor_id) else {
         return Vec::new();
@@ -193,8 +194,8 @@ fn collect_held_lost_statuses(
 
     effects
         .iter()
-        .filter_map(|effect| match effect.kind {
-            EffectKind::LoseEffect { effect_id, .. } => Some(effect_id),
+        .filter_map(|effect| match effect.0 {
+            TargetEffectKind::LoseEffect { effect_id, .. } => Some(effect_id),
             _ => None,
         })
         .filter(|effect_id| status_effects.get(*effect_id).is_some())
@@ -258,26 +259,26 @@ fn send_job_gauge_update(
     );
 }
 
-/// Maximum number of targets a single `AoeEffect32` packet can carry. Targets beyond this are
+/// Maximum number of targets a single `ActionEffect32` packet can carry. Targets beyond this are
 /// dropped (their damage is swallowed), matching how retail caps one effect packet.
 const MAX_AOE_TARGETS: usize = 32;
 
-/// Build the smallest `AoeEffectN` IPC data that holds `targets`, packing each target's effect into
+/// Build the smallest `ActionEffectN` IPC data that holds `targets`, packing each target's effect into
 /// its own 8-slot row. `targets` is `(target, effect)` pairs and must already be capped to
 /// [`MAX_AOE_TARGETS`]. Returns `None` if there are no targets.
 fn build_aoe_effect_packet(
-    header: AoeEffectHeader,
-    targets: &[(ObjectTypeId, ActionEffect)],
+    header: ActionEffectHeader,
+    targets: &[(ObjectTypeId, TargetEffect)],
     center: kawari::common::Position,
 ) -> Option<ServerZoneIpcData> {
     if targets.is_empty() {
         return None;
     }
 
-    /// Fill a fixed `[[ActionEffect; 8]; N]` / `[ObjectTypeId; N]` pair from `targets`.
+    /// Fill a fixed `[[TargetEffect; 8]; N]` / `[ObjectTypeId; N]` pair from `targets`.
     macro_rules! build_variant {
         ($variant:ident, $struct:ident, $n:expr) => {{
-            let mut effects = [[ActionEffect::default(); 8]; $n];
+            let mut effects = [[TargetEffect::default(); 8]; $n];
             let mut target_ids = [ObjectTypeId::default(); $n];
             for (i, (target, effect)) in targets.iter().enumerate() {
                 effects[i][0] = *effect;
@@ -293,10 +294,10 @@ fn build_aoe_effect_packet(
     }
 
     Some(match targets.len() {
-        0..=8 => build_variant!(AoeEffect8, AoeEffect8, 8),
-        9..=16 => build_variant!(AoeEffect16, AoeEffect16, 16),
-        17..=24 => build_variant!(AoeEffect24, AoeEffect24, 24),
-        _ => build_variant!(AoeEffect32, AoeEffect32, 32),
+        0..=8 => build_variant!(ActionEffect8, ActionEffect8, 8),
+        9..=16 => build_variant!(ActionEffect16, ActionEffect16, 16),
+        17..=24 => build_variant!(ActionEffect24, ActionEffect24, 24),
+        _ => build_variant!(ActionEffect32, ActionEffect32, 32),
     })
 }
 
@@ -316,16 +317,16 @@ const EFFECT_FLAG_AT_SOURCE: u8 = 0x80;
 /// Only the flag needs adding. `unk3` is the flags byte (BossMod calls it Param4) and bit 7 is
 /// "at source"; without it the client credits the buff to the target and announces it there --
 /// Apex Arrow on a striking dummy read as the dummy gaining Blast Arrow Ready.
-fn wire_effect_kind(kind: EffectKind) -> EffectKind {
+fn wire_effect_kind(kind: TargetEffectKind) -> TargetEffectKind {
     match kind {
-        EffectKind::GainEffectSelf {
+        TargetEffectKind::GainEffectSelf {
             unk1,
             unk2,
             unk3,
             effect_id,
             param,
             duration,
-        } => EffectKind::GainEffectSelf {
+        } => TargetEffectKind::GainEffectSelf {
             unk1,
             unk2,
             unk3: unk3 | EFFECT_FLAG_AT_SOURCE,
@@ -337,29 +338,27 @@ fn wire_effect_kind(kind: EffectKind) -> EffectKind {
     }
 }
 
-/// Builds the `ActionResult` effect array shown to the client.
+/// Builds the `ActionEffect1` effect array shown to the client.
 ///
 /// Status gains must reach the client through here: this array drives the buff-applied animation
 /// and the "X gains Y" battle log line. Filtering them out left songs and self-buffs silent.
-fn target_action_result_effects(effects: &[ActionEffect]) -> ([ActionEffect; 8], u8) {
-    let mut target_effects = [ActionEffect::default(); 8];
+fn target_action_result_effects(effects: &[TargetEffect]) -> [TargetEffect; 8] {
+    let mut target_effects = [TargetEffect::default(); 8];
     let mut count = 0usize;
 
     for effect in effects {
-        if matches!(effect.kind, EffectKind::LoseEffect { .. }) {
+        if matches!(effect.0, TargetEffectKind::LoseEffect { .. }) {
             continue;
         }
         if count == target_effects.len() {
             break;
         }
 
-        target_effects[count] = ActionEffect {
-            kind: wire_effect_kind(effect.kind),
-        };
+        target_effects[count] = TargetEffect(wire_effect_kind(effect.0));
         count += 1;
     }
 
-    (target_effects, count as u8)
+    target_effects
 }
 
 /// AoE damage falloff applied to *secondary* targets (the primary at slot 0 always takes full
@@ -755,8 +754,7 @@ pub fn handle_action_messages(
                             if let NetworkedActor::Player { combat_state, .. } = actor {
                                 let group = game_data.get_action_cooldown_group(request.action_id);
                                 if group > 0 {
-                                    Some(combat_state
-                                        .cooldown_timer_values(usize::from(group - 1)))
+                                    Some(combat_state.cooldown_timer_values(usize::from(group - 1)))
                                 } else {
                                     Some((0, 0))
                                 }
@@ -1059,9 +1057,9 @@ pub fn execute_action(
     };
 
     if let Some(mut effects_builder) = effects_builder {
-        // Retail's Teleport (action 5) ActionResult carries a single magic-61 effect holding the
-        // destination TerritoryType (effect_count = 1). Kawari's Teleport Lua returns an empty
-        // builder, so without this the result is malformed (effect_count = 0) and the teleport-out
+        // Retail's Teleport (action 5) ActionEffect1 carries a single magic-61 effect holding the
+        // destination TerritoryType (one populated effect slot). Kawari's Teleport Lua returns an
+        // empty builder, so without this the result is malformed (no effects) and the teleport-out
         // animation never resolves — the caster stays stuck in the teleport pose. Resolve the
         // destination territory from the queued aetheryte and attach the effect to match retail.
         const TELEPORT_ACTION_ID: u32 = 5;
@@ -1076,12 +1074,12 @@ pub fn execute_action(
                     .map(|(_, zone)| zone)
                     .unwrap_or_default()
             };
-            effects_builder.effects.push(ActionEffect {
-                kind: EffectKind::Teleport {
+            effects_builder
+                .effects
+                .push(TargetEffect(TargetEffectKind::Teleport {
                     unk: [0; 5],
                     territory,
-                },
-            });
+                }));
         }
 
         let cleared_cooldown_groups;
@@ -1143,10 +1141,10 @@ pub fn execute_action(
                 effects_builder.effects = effects_builder
                     .effects
                     .iter()
-                    .map(|effect| match effect.kind {
-                        EffectKind::Damage { .. } => ActionEffect {
-                            kind: EffectKind::Invincible {},
-                        },
+                    .map(|effect| match effect.0 {
+                        TargetEffectKind::Damage { .. } => {
+                            TargetEffect(TargetEffectKind::Invincible {})
+                        }
                         _ => *effect,
                     })
                     .collect();
@@ -1187,16 +1185,16 @@ pub fn execute_action(
                     QueuedTaskData::ResetCombo,
                 );
 
-                effects_builder.effects.push(ActionEffect {
-                    kind: EffectKind::ExecuteCombo {
+                effects_builder
+                    .effects
+                    .push(TargetEffect(TargetEffectKind::ExecuteCombo {
                         sequence,
                         unk2: 0,
                         unk3: 0,
                         unk4: 0,
                         unk5: 128,
                         action_id: resolved_request.action_id as u16,
-                    },
-                });
+                    }));
             }
 
             if summoner::is_summoner(class_job) {
@@ -1211,8 +1209,8 @@ pub fn execute_action(
             (aoe_base_damage, aoe_damage_type) = effects_builder
                 .effects
                 .iter()
-                .find_map(|effect| match effect.kind {
-                    EffectKind::Damage {
+                .find_map(|effect| match effect.0 {
+                    TargetEffectKind::Damage {
                         amount,
                         damage_type,
                         ..
@@ -1247,8 +1245,8 @@ pub fn execute_action(
             source_damage_modifiers = action_damage_modifiers(instance.find_actor(from_actor_id));
 
             for effect in &mut effects_builder.effects {
-                match &mut effect.kind {
-                    EffectKind::Damage {
+                match &mut effect.0 {
+                    TargetEffectKind::Damage {
                         amount,
                         damage_kind,
                         damage_type,
@@ -1287,7 +1285,7 @@ pub fn execute_action(
                         *damage_element =
                             game_data.get_action_damage_element(resolved_request.action_id);
                     }
-                    EffectKind::Heal { amount, .. } => {
+                    TargetEffectKind::Heal { amount, .. } => {
                         let heal_target = resolved_request.target.object_id;
 
                         // Actually restore the target's HP, clamped to their maximum.
@@ -1334,10 +1332,10 @@ pub fn execute_action(
                             }
                         }
                     }
-                    EffectKind::InterruptAction {} => {
+                    TargetEffectKind::InterruptAction {} => {
                         instance.cancel_actor_tasks(resolved_request.target.object_id);
                     }
-                    EffectKind::SummonPet { .. } => {
+                    TargetEffectKind::SummonPet { .. } => {
                         // Defer the actual pet spawn until *after* the result packet is sent, so the
                         // client receives the SummonPet effect (which plays the summon gesture/VFX)
                         // before the pet actor appears. Spawning here would pop the pet in with no
@@ -1499,11 +1497,8 @@ pub fn execute_action(
 
             // The action's LoseEffect statuses that the caster really holds, sampled BEFORE the
             // job modules below can consume them. See `lost_statuses` use further down.
-            lost_statuses = collect_held_lost_statuses(
-                instance,
-                from_actor_id,
-                &effects_builder.effects,
-            );
+            lost_statuses =
+                collect_held_lost_statuses(instance, from_actor_id, &effects_builder.effects);
 
             // Register damage barriers requested by the action. The status itself is also sent as a
             // normal gain effect, but the absorb pool lives server-side and is consumed on damage.
@@ -1650,7 +1645,7 @@ pub fn execute_action(
         let mut action_global_sequence = 0;
 
         {
-            let (effects, effect_count) = target_action_result_effects(&effects_builder.effects);
+            let effects = target_action_result_effects(&effects_builder.effects);
 
             let action_animation_id = {
                 let mut game_data = game_data.lock();
@@ -1679,7 +1674,7 @@ pub fn execute_action(
             // Gather every *other* enemy inside the AoE radius (if this action is an AoE at all),
             // rolling and applying each one's damage/enmity/HP now. The primary target occupies
             // slot 0; these are slots 1.. of the same effect packet.
-            let mut secondary_targets: Vec<(ObjectTypeId, ActionEffect)> = Vec::new();
+            let mut secondary_targets: Vec<(ObjectTypeId, TargetEffect)> = Vec::new();
             if let Some(damage_element) = aoe_damage_element {
                 if let Some(center) = instance
                     .find_actor(resolved_request.target.object_id)
@@ -1726,8 +1721,7 @@ pub fn execute_action(
                     for target_id in secondaries {
                         let falloff_base =
                             aoe_secondary_falloff_base(resolved_request.action_id, aoe_base_damage);
-                        let base_amount =
-                            source_damage_modifiers.apply_base_damage(falloff_base);
+                        let base_amount = source_damage_modifiers.apply_base_damage(falloff_base);
                         let (rolled, kind) = lua_player
                             .base_parameters
                             .roll_damage_with_modifiers(base_amount, source_damage_modifiers.roll);
@@ -1755,28 +1749,26 @@ pub fn execute_action(
                                 object_id: target_id,
                                 object_type: resolved_request.target.object_type,
                             },
-                            ActionEffect {
-                                kind: EffectKind::Damage {
-                                    amount: rolled,
-                                    damage_kind: kind,
-                                    damage_type: aoe_damage_type,
-                                    damage_element,
-                                    bonus_percent: 0,
-                                    unk3: 0,
-                                    unk4: 0,
-                                },
-                            },
+                            TargetEffect(TargetEffectKind::Damage {
+                                amount: rolled,
+                                damage_kind: kind,
+                                damage_type: aoe_damage_type,
+                                damage_element,
+                                bonus_percent: 0,
+                                unk3: 0,
+                                unk4: 0,
+                            }),
                         ));
                     }
                 }
             }
 
             if secondary_targets.is_empty() {
-                // Single target (or an AoE that hit nothing else): a plain ActionResult, carrying
+                // Single target (or an AoE that hit nothing else): a plain ActionEffect1, carrying
                 // the primary's full effect set (damage, combo, gained buffs, ...).
                 let mut net = network.lock();
                 let ipc =
-                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
                         animation_target_id: resolved_request.target,
                         target_id_again: resolved_request.target,
                         action_id: resolved_request.action_id,
@@ -1784,7 +1776,7 @@ pub fn execute_action(
                         rotation: common_spawn.rotation,
                         spell_id: action_animation_id,
                         source_sequence: resolved_request.sequence,
-                        effect_count,
+                        target_count: 1,
                         effects,
                         action_type: resolved_request.action_type,
                         global_sequence: net.global_action_sequence,
@@ -1799,25 +1791,25 @@ pub fn execute_action(
                     DestinationNetwork::ZoneClients,
                 );
             } else {
-                // Multiple targets: one AoeEffectN packet, primary at slot 0 then each secondary.
+                // Multiple targets: one ActionEffectN packet, primary at slot 0 then each secondary.
                 let center = instance
                     .find_actor(resolved_request.target.object_id)
                     .map(|actor| actor.position().0)
                     .unwrap_or_default();
 
-                let mut all_targets: Vec<(ObjectTypeId, ActionEffect)> =
+                let mut all_targets: Vec<(ObjectTypeId, TargetEffect)> =
                     Vec::with_capacity(secondary_targets.len() + 1);
                 let primary_effect = effects_builder
                     .effects
                     .iter()
                     .copied()
-                    .find(|e| matches!(e.kind, EffectKind::Damage { .. }))
+                    .find(|e| matches!(e.0, TargetEffectKind::Damage { .. }))
                     .unwrap_or_default();
                 all_targets.push((resolved_request.target, primary_effect));
                 all_targets.extend(secondary_targets.iter().copied());
 
                 let mut net = network.lock();
-                let header = AoeEffectHeader {
+                let header = ActionEffectHeader {
                     animation_target_id: resolved_request.target,
                     action_id: resolved_request.action_id,
                     animation_lock: ANIMATION_LOCK_TIME,
@@ -1901,12 +1893,12 @@ pub fn execute_action(
             let mut target_entries = [EffectEntry::default(); 4];
 
             for effect in &effects_builder.effects {
-                if let EffectKind::GainEffect {
+                if let TargetEffectKind::GainEffect {
                     effect_id,
                     duration,
                     param,
                     ..
-                } = effect.kind
+                } = effect.0
                 {
                     let index = gain_effect(
                         network.clone(),
@@ -1931,12 +1923,12 @@ pub fn execute_action(
                     num_target_entries += 1;
                 }
 
-                if let EffectKind::GainEffectSelf {
+                if let TargetEffectKind::GainEffectSelf {
                     effect_id,
                     duration,
                     param,
                     ..
-                } = effect.kind
+                } = effect.0
                 {
                     let index = gain_effect(
                         network.clone(),
@@ -1961,7 +1953,7 @@ pub fn execute_action(
                     num_self_entries += 1;
                 }
 
-                if let EffectKind::LoseEffect { effect_id, .. } = effect.kind {
+                if let TargetEffectKind::LoseEffect { effect_id, .. } = effect.0 {
                     let mut data = data.lock();
                     if let Some(instance) = data.find_actor_instance_mut(from_actor_id) {
                         remove_status_from_actor_instance(instance, from_actor_id, effect_id);
@@ -2141,11 +2133,11 @@ pub fn execute_enemy_action(
 
             // Apply ±5% variance and the target's defense mitigation to each hit.
             for effect in &mut effects_builder.effects {
-                if let EffectKind::Damage {
+                if let TargetEffectKind::Damage {
                     amount,
                     damage_type,
                     ..
-                } = &mut effect.kind
+                } = &mut effect.0
                 {
                     let mitigation = if *damage_type == DamageType::Magic {
                         mitigation_magic
@@ -2165,7 +2157,7 @@ pub fn execute_enemy_action(
             }
 
             for effect in &effects_builder.effects {
-                if let EffectKind::Damage { amount, .. } = effect.kind {
+                if let TargetEffectKind::Damage { amount, .. } = effect.0 {
                     actor.apply_damage(amount as u32);
                 }
             }
@@ -2180,10 +2172,10 @@ pub fn execute_enemy_action(
         {
             let mut network = network.lock();
 
-            let mut effects = [ActionEffect::default(); 8];
+            let mut effects = [TargetEffect::default(); 8];
             effects[..effects_builder.effects.len()].copy_from_slice(&effects_builder.effects);
 
-            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+            let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
                 animation_target_id: request.target,
                 target_id_again: request.target,
                 action_id: request.action_id,
@@ -2191,7 +2183,7 @@ pub fn execute_enemy_action(
                 rotation: common_spawn.rotation,
                 spell_id: request.action_id as u16,
                 source_sequence: request.sequence,
-                effect_count: effects_builder.effects.len() as u8,
+                target_count: 1,
                 effects,
                 action_type: request.action_type,
                 global_sequence: network.global_action_sequence,
@@ -2213,12 +2205,12 @@ pub fn execute_enemy_action(
             let mut entries = [EffectEntry::default(); 4];
 
             for effect in &effects_builder.effects {
-                if let EffectKind::GainEffect {
+                if let TargetEffectKind::GainEffect {
                     effect_id,
                     duration,
                     param,
                     ..
-                } = effect.kind
+                } = effect.0
                 {
                     entries[num_entries as usize] = EffectEntry {
                         index: num_entries,
@@ -2416,16 +2408,14 @@ pub fn execute_mount_action(
 
     let common_spawn = actor.get_common_spawn();
 
-    let mut effects = [ActionEffect::default(); 8];
-    effects[0] = ActionEffect {
-        kind: EffectKind::Mount {
-            unk1: 1,
-            unk2: 0,
-            id: request.action_id as u16,
-        },
-    };
+    let mut effects = [TargetEffect::default(); 8];
+    effects[0] = TargetEffect(TargetEffectKind::Mount {
+        unk1: 1,
+        unk2: 0,
+        id: request.action_id as u16,
+    });
 
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionResult(ActionResult {
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActionEffect1(ActionEffect1 {
         animation_target_id: request.target,
         target_id_again: request.target,
         action_id: request.action_id,
@@ -2433,7 +2423,7 @@ pub fn execute_mount_action(
         rotation: common_spawn.rotation,
         spell_id: 4,
         source_sequence: request.sequence,
-        effect_count: 1,
+        target_count: 1,
         effects,
         action_type: request.action_type,
         global_sequence: network.global_action_sequence,
@@ -2598,40 +2588,34 @@ mod tests {
     const BLAST_ARROW_READY: u16 = 2692;
     const BLAST_ARROW_READY_ALT: u16 = 3142;
 
-    fn lose(effect_id: u16) -> ActionEffect {
-        ActionEffect {
-            kind: EffectKind::LoseEffect {
-                param: 0,
-                unk: [0; 3],
-                effect_id,
-            },
-        }
+    fn lose(effect_id: u16) -> TargetEffect {
+        TargetEffect(TargetEffectKind::LoseEffect {
+            param: 0,
+            unk: [0; 3],
+            effect_id,
+        })
     }
 
-    fn gain_target(effect_id: u16) -> ActionEffect {
-        ActionEffect {
-            kind: EffectKind::GainEffect {
-                unk1: 0,
-                unk2: 0,
-                unk3: 0,
-                effect_id,
-                param: 0,
-                duration: 30.0,
-            },
-        }
+    fn gain_target(effect_id: u16) -> TargetEffect {
+        TargetEffect(TargetEffectKind::GainEffect {
+            unk1: 0,
+            unk2: 0,
+            unk3: 0,
+            effect_id,
+            param: 0,
+            duration: 30.0,
+        })
     }
 
-    fn gain_self(effect_id: u16) -> ActionEffect {
-        ActionEffect {
-            kind: EffectKind::GainEffectSelf {
-                unk1: 0,
-                unk2: 0,
-                unk3: 0,
-                effect_id,
-                param: 0,
-                duration: 30.0,
-            },
-        }
+    fn gain_self(effect_id: u16) -> TargetEffect {
+        TargetEffect(TargetEffectKind::GainEffectSelf {
+            unk1: 0,
+            unk2: 0,
+            unk3: 0,
+            effect_id,
+            param: 0,
+            duration: 30.0,
+        })
     }
 
     /// Status gains have to survive into the array, or the client never plays the buff animation
@@ -2639,17 +2623,21 @@ mod tests {
     /// filtered out. The kind itself is preserved: it encodes who the entry is for.
     #[test]
     fn status_gains_reach_the_client() {
-        let (effects, count) =
-            target_action_result_effects(&[gain_target(1821), gain_self(3867)]);
+        let effects = target_action_result_effects(&[gain_target(1821), gain_self(3867)]);
 
-        assert_eq!(count, 2);
         assert!(matches!(
-            effects[0].kind,
-            EffectKind::GainEffect { effect_id: 1821, .. }
+            effects[0].0,
+            TargetEffectKind::GainEffect {
+                effect_id: 1821,
+                ..
+            }
         ));
         assert!(matches!(
-            effects[1].kind,
-            EffectKind::GainEffectSelf { effect_id: 3867, .. }
+            effects[1].0,
+            TargetEffectKind::GainEffectSelf {
+                effect_id: 3867,
+                ..
+            }
         ));
     }
 
@@ -2657,20 +2645,23 @@ mod tests {
     /// client writes each entry to the slot its `index` names, and a blank entry wipes slot 0.
     #[test]
     fn removals_take_no_entry() {
-        let (_, count) = target_action_result_effects(&[lose(2692)]);
+        let effects = target_action_result_effects(&[lose(2692)]);
 
-        assert_eq!(count, 0);
+        // The lose effect is filtered out, so slot 0 stays the default (no effect).
+        assert_eq!(effects[0].0, TargetEffectKind::None);
     }
 
     /// The flags byte has to say "at source", or the client credits the buff to the action's
     /// target: Apex Arrow on a striking dummy announced the dummy gaining Blast Arrow Ready.
     #[test]
     fn a_gain_on_the_caster_is_flagged_at_source() {
-        let (effects, count) = target_action_result_effects(&[gain_self(2692)]);
+        let effects = target_action_result_effects(&[gain_self(2692)]);
 
-        assert_eq!(count, 1);
-        let EffectKind::GainEffectSelf { unk3, .. } = effects[0].kind else {
-            panic!("expected the gain to stay GainEffectSelf, got {:?}", effects[0].kind);
+        let TargetEffectKind::GainEffectSelf { unk3, .. } = effects[0].0 else {
+            panic!(
+                "expected the gain to stay GainEffectSelf, got {:?}",
+                effects[0].0
+            );
         };
         assert_eq!(unk3 & EFFECT_FLAG_AT_SOURCE, EFFECT_FLAG_AT_SOURCE);
     }
@@ -2683,21 +2674,22 @@ mod tests {
         use binrw::BinWrite;
         use std::io::Cursor;
 
-        let effect = ActionEffect {
-            kind: EffectKind::GainEffect {
-                unk1: 0,
-                unk2: 0,
-                unk3: 0,
-                effect_id: 1199,
-                param: 20,
-                duration: 30.0,
-            },
-        };
+        let effect = TargetEffect(TargetEffectKind::GainEffect {
+            unk1: 0,
+            unk2: 0,
+            unk3: 0,
+            effect_id: 1199,
+            param: 20,
+            duration: 30.0,
+        });
 
         let mut cursor = Cursor::new(Vec::new());
         effect.write_le(&mut cursor).unwrap();
 
-        assert_eq!(cursor.into_inner(), vec![0x0E, 0, 0, 0x14, 0, 0, 0xAF, 0x04]);
+        assert_eq!(
+            cursor.into_inner(),
+            vec![0x0E, 0, 0, 0x14, 0, 0, 0xAF, 0x04]
+        );
     }
 
     /// Only the ids the caster really holds are reported, so the client is not told twice about

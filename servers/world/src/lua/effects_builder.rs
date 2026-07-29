@@ -1,10 +1,10 @@
 use mlua::{FromLua, Lua, UserData, UserDataMethods, Value};
 
-use kawari::ipc::zone::{ActionEffect, DamageElement, DamageKind, DamageType, EffectKind};
+use kawari::ipc::zone::{DamageElement, DamageKind, DamageType, TargetEffect, TargetEffectKind};
 
 /// A server-side enmity (hate) instruction produced by an action script.
 ///
-/// Unlike [`ActionEffect`]s, these are *not* part of the network packets sent to the client.
+/// Unlike [`TargetEffect`]s, these are *not* part of the network packets sent to the client.
 /// They are resolved on the server (see `execute_action`) against the instance's hate lists
 /// once the action's target is known.
 #[derive(Clone, Debug)]
@@ -65,7 +65,7 @@ pub struct BarrierAction {
 
 #[derive(Clone, Debug, Default)]
 pub struct EffectsBuilder {
-    pub effects: Vec<ActionEffect>,
+    pub effects: Vec<TargetEffect>,
     /// Server-side enmity instructions to resolve once the action's target is known.
     pub enmity_actions: Vec<EnmityAction>,
     /// Server-side job-gauge changes to apply to the caster.
@@ -81,65 +81,60 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "damage",
             |_, this, (damage_type, amount): (DamageType, u32)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::Damage {
-                        damage_kind: DamageKind::default(),
-                        damage_type,
-                        damage_element: DamageElement::Unaspected, // Will be filled in later
-                        bonus_percent: 0,
-                        unk3: 0,
-                        unk4: 0,
-                        amount,
-                    },
-                });
+                this.effects.push(TargetEffect(TargetEffectKind::Damage {
+                    damage_kind: DamageKind::default(),
+                    damage_type,
+                    damage_element: DamageElement::Unaspected, // Will be filled in later
+                    bonus_percent: 0,
+                    unk3: 0,
+                    unk4: 0,
+                    amount,
+                }));
                 Ok(())
             },
         );
         methods.add_method_mut(
             "gain_effect",
             |_, this, (effect_id, param, duration): (u16, u16, f32)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffect {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffect {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 Ok(())
             },
         );
         methods.add_method_mut(
             "gain_effect_self",
             |_, this, (effect_id, param, duration): (u16, u16, f32)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffectSelf {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffectSelf {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 Ok(())
             },
         );
         methods.add_method_mut(
             "gain_barrier",
             |_, this, (effect_id, param, duration, amount): (u16, u16, f32, u32)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffect {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffect {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.barrier_actions.push(BarrierAction {
                     effect_id,
                     param,
@@ -153,16 +148,15 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "gain_barrier_self",
             |_, this, (effect_id, param, duration, amount): (u16, u16, f32, u32)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffectSelf {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffectSelf {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.barrier_actions.push(BarrierAction {
                     effect_id,
                     param,
@@ -178,76 +172,65 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "lose_effect",
             |_, this, (effect_id, effect_param): (u16, u16)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::LoseEffect {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::LoseEffect {
                         param: effect_param,
                         unk: [0; 3],
                         effect_id,
-                    },
-                });
+                    }));
                 Ok(())
             },
         );
         methods.add_method_mut("heal", |_, this, amount: u32| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::Heal {
-                    unk1: [0; 5],
-                    amount,
-                },
-            });
+            this.effects.push(TargetEffect(TargetEffectKind::Heal {
+                unk1: [0; 5],
+                amount,
+            }));
             Ok(())
         });
         methods.add_method_mut("interrupt", |_, this, _: ()| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::InterruptAction {},
-            });
+            this.effects
+                .push(TargetEffect(TargetEffectKind::InterruptAction {}));
             Ok(())
         });
         // This is the *real* interrupt (effect 76): it tells the client to actually cancel the
         // target's in-progress cast. `interrupt()` above only pushes the magic-8 no-effect marker
         // (e.g. Head Graze), which doesn't stop a cast on its own.
         methods.add_method_mut("interrupt_cast", |_, this, _: ()| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::Interrupt {},
-            });
+            this.effects
+                .push(TargetEffect(TargetEffectKind::Interrupt {}));
             Ok(())
         });
         methods.add_method_mut("play_vfx", |_, this, effect_id: u16| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::PlayVFX {
-                    unk: [0; 5],
-                    effect_id,
-                },
-            });
+            this.effects.push(TargetEffect(TargetEffectKind::PlayVFX {
+                unk: [0; 5],
+                effect_id,
+            }));
             Ok(())
         });
         methods.add_method_mut("summon_pet", |_, this, _: ()| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::SummonPet {
-                    unk: [0, 0, 0, 0, 128, 157, 0],
-                },
-            });
+            this.effects.push(TargetEffect(TargetEffectKind::SummonPet {
+                unk: [0, 0, 0, 0, 128, 157, 0],
+            }));
             Ok(())
         });
         methods.add_method_mut("summon_demi", |_, this, _: ()| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::SummonDemi {
+            this.effects
+                .push(TargetEffect(TargetEffectKind::SummonDemi {
                     unk: [0, 0, 0, 0, 0, 1, 0],
-                },
-            });
+                }));
             Ok(())
         });
         methods.add_method_mut("execute_combo", |_, this, sequence: u8| {
-            this.effects.push(ActionEffect {
-                kind: EffectKind::ExecuteCombo {
+            this.effects
+                .push(TargetEffect(TargetEffectKind::ExecuteCombo {
                     sequence,
                     unk2: 0,
                     unk3: 0,
                     unk4: 0,
                     unk5: 128,
                     action_id: 0, // Filled in later
-                },
-            });
+                }));
             Ok(())
         });
         // Add a flat amount of enmity for the caster on the action's target.
@@ -277,16 +260,15 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "gain_dot",
             |_, this, (effect_id, param, duration, potency): (u16, u16, f32, u16)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffect {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffect {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.tick_actions.push(TickAction {
                     effect_id,
                     param,
@@ -302,16 +284,15 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "gain_dot_physical",
             |_, this, (effect_id, param, duration, potency): (u16, u16, f32, u16)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffect {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffect {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.tick_actions.push(TickAction {
                     effect_id,
                     param,
@@ -328,16 +309,15 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "gain_hot",
             |_, this, (effect_id, param, duration, potency): (u16, u16, f32, u16)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffectSelf {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffectSelf {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.tick_actions.push(TickAction {
                     effect_id,
                     param,
@@ -354,16 +334,15 @@ impl UserData for EffectsBuilder {
         methods.add_method_mut(
             "gain_mp_refresh",
             |_, this, (effect_id, param, duration, amount): (u16, u16, f32, u16)| {
-                this.effects.push(ActionEffect {
-                    kind: EffectKind::GainEffectSelf {
+                this.effects
+                    .push(TargetEffect(TargetEffectKind::GainEffectSelf {
                         unk1: 0,
                         unk2: 0,
                         unk3: 0,
                         effect_id,
                         duration,
                         param,
-                    },
-                });
+                    }));
                 this.tick_actions.push(TickAction {
                     effect_id,
                     param,
