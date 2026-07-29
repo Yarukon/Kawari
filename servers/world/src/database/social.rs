@@ -76,10 +76,19 @@ impl WorldDatabase {
         {
             use schema::party::dsl::*;
 
-            found_party = party
+            // The `party` table is committed asynchronously (see `commit_parties`), so it lags behind
+            // live party changes: right after a join, the in-memory party exists but its DB row may
+            // not be written yet. A missing row here is that transient window, NOT an error -- return
+            // no entries and let the caller fall back (the authoritative join push, `build_party_list`,
+            // reads in-memory and is unaffected). Unwrapping here panicked the worker (NotFound).
+            match party
                 .filter(id.eq(party_id))
                 .first::<models::Party>(&mut self.connection)
-                .unwrap();
+            {
+                Ok(p) => found_party = p,
+                Err(diesel::result::Error::NotFound) => return Vec::new(),
+                Err(e) => panic!("get_party_entries: unexpected DB error: {e}"),
+            }
         }
 
         let mut entries = Vec::new();

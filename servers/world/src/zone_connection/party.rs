@@ -135,7 +135,13 @@ impl ZoneConnection {
         let mut game_data = self.gamedata.lock();
         if self.party_id != 0 {
             entries = database.get_party_entries(&mut game_data, self.party_id as i64);
-        } else {
+        }
+
+        // Solo (party_id == 0), OR the party's DB row has not been committed yet (async commit lag,
+        // see `get_party_entries`): fall back to a single self-entry so the client always gets a
+        // well-formed list. The authoritative multi-member list arrives via the join push
+        // (`build_party_list`, in-memory) and any subsequent party-list pull once the commit lands.
+        if entries.is_empty() {
             entries.push(
                 database.get_player_entry(&mut game_data, self.player_data.character.content_id),
             );
