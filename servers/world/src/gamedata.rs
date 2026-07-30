@@ -2121,10 +2121,14 @@ impl GameData {
     }
 
     pub fn get_action_mp_cost(&mut self, id: u32) -> u32 {
-        const PRIMARY_COST_TYPE_MP: u8 = 3;
+        // The set of Action.PrimaryCostType values the retail client treats as an MP cost is
+        // hardcoded in the client binary (extracted 2026-07-30). All of them charge
+        // PrimaryCostValue * 100 MP. Type 3 is the common one; the rest are job-specific variants
+        // (e.g. 72 = Summoner attuned-gem Rite/Catastrophe). Any other cost type = non-MP (0 here).
+        const MP_COST_TYPES: [u8; 13] = [3, 12, 51, 70, 72, 73, 74, 76, 78, 83, 92, 96, 97];
 
         let row = self.action_sheet.row(id).unwrap();
-        if row.PrimaryCostType == PRIMARY_COST_TYPE_MP {
+        if MP_COST_TYPES.contains(&row.PrimaryCostType) {
             u32::from(row.PrimaryCostValue) * 100
         } else {
             0
