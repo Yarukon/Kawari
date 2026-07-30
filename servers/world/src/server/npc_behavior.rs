@@ -110,7 +110,26 @@ pub fn npc_behavior(
                 // If we are in distance, rotate towards target
                 if distance <= MINIMUM_PATHFINDING_DISTANCE {
                     position = Some(spawn.common.position);
-                    rotation = Some(rotate(spawn.common.position.0, target_pos));
+                    // A Follow pet's navmesh_target is its owner, so this branch would normally
+                    // re-face the pet at the owner every tick. When the pet holds a live enemy
+                    // combat target — a demi-summon (Bahamut/Phoenix) mid auto-attack sets
+                    // `target_id` to the enemy without leaving Follow — re-facing the owner would
+                    // overwrite the attack facing and snap the pet back the next tick. Hold the
+                    // current rotation in that case so the attack facing sticks; the paired
+                    // dirty-check below then suppresses the redundant broadcast.
+                    // NOTE: `enemies` (find_possible_enemies) is all LIVING actors, not only
+                    // hostiles — hostility is guaranteed upstream (only demi/primal set a pet's
+                    // target_id, gated by live_attackable_npc). Hence "live target", not "enemy".
+                    let combat_target = spawn.common.target_id.object_id;
+                    let holds_live_target = *state == NpcState::Follow
+                        && combat_target.is_valid()
+                        && combat_target != current_target
+                        && enemies.iter().any(|(eid, _, _)| *eid == combat_target);
+                    if holds_live_target {
+                        rotation = Some(spawn.common.rotation);
+                    } else {
+                        rotation = Some(rotate(spawn.common.position.0, target_pos));
+                    }
                 } else if !current_path.is_empty() {
                     // otherwise, Follow current path
                     let next_position = current_path[0];
@@ -133,14 +152,26 @@ pub fn npc_behavior(
                 if let Some(position) = position
                     && let Some(rotation) = rotation
                 {
-                    actor_moves.push(FromServer::ActorMove(
-                        *id,
-                        position,
-                        rotation,
-                        MoveAnimationType::empty(),
-                        MoveAnimationState::empty(),
-                        JumpState::empty(),
-                    ));
+                    // Dirty-check: an at-rest pet inside MINIMUM_PATHFINDING_DISTANCE takes the
+                    // "face target" branch above, which keeps `position` at the current spawn
+                    // position and only recomputes `rotation`. Once the owner stands still the
+                    // recomputed rotation also stops changing, so this would push an identical
+                    // ActorMove every 300 ms tick — redundant packet spam that never moves the pet.
+                    // Skip the push when neither position nor rotation actually changed. Genuine
+                    // movement (the owner walks away → the path branch produces a new position) and
+                    // genuine re-facing (a combat target moves) still differ and broadcast normally.
+                    let unchanged =
+                        position == spawn.common.position && rotation == spawn.common.rotation;
+                    if !unchanged {
+                        actor_moves.push(FromServer::ActorMove(
+                            *id,
+                            position,
+                            rotation,
+                            MoveAnimationType::empty(),
+                            MoveAnimationState::empty(),
+                            JumpState::empty(),
+                        ));
+                    }
                 }
             }
         }
