@@ -27,7 +27,11 @@ use kawari::ipc::zone::{ActionRequest, ServerZoneIpcData, ServerZoneIpcSegment, 
 /// use a field leave it at `Default`.
 #[derive(Debug, Default, Clone, Copy)]
 pub(in crate::server) struct JobActionUpdate {
+    /// Mirror `JobRefreshResult`; populated for job-wiring symmetry, not yet read on the action path.
+    #[allow(dead_code)]
     pub changed: bool,
+    /// Mirror `JobRefreshResult`; populated for job-wiring symmetry, not yet read on the action path.
+    #[allow(dead_code)]
     pub status_timer_refreshed: bool,
     pub cooldown_update: Option<JobCooldownUpdate>,
 }

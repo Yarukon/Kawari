@@ -244,11 +244,6 @@ impl BardState {
     }
 }
 
-/// Check if the given class_job is Bard
-pub(crate) fn is_bard(class_job: u8) -> bool {
-    class_job == CLASSJOB_BARD || class_job == CLASSJOB_CATEGORY_BARD
-}
-
 /// Maps a Bard action to the party-propagatable status it grants, if any.
 ///
 /// Returns `Some((status_id, param, duration_secs))` for exactly the two in-scope raid buffs;
