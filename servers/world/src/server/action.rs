@@ -1029,7 +1029,12 @@ pub fn execute_action(
             return;
         };
         let mut network = network.lock();
-        summoner::sync_pet_for_mount(&mut network, instance, from_actor_id);
+        let class_job = instance
+            .find_actor(from_actor_id)
+            .map(|actor| actor.get_common_spawn().class_job);
+        if let Some(actors) = class_job.and_then(job_for).and_then(Job::persistent_actors) {
+            actors.sync_pet_for_mount(&mut network, instance, from_actor_id);
+        }
         return;
     }
 
@@ -1714,13 +1719,15 @@ pub fn execute_action(
             }
         }
 
-        if has_summoner_pet_transition {
+        if has_summoner_pet_transition
+            && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+        {
             let mut data = data.lock();
             let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                 return;
             };
             let mut network = network.lock();
-            summoner::prepare_pet_transition_for_action(
+            actors.prepare_pet_transition_for_action(
                 &mut network,
                 instance,
                 from_actor_id,
@@ -1959,21 +1966,23 @@ pub fn execute_action(
             send_job_gauge_update(&mut network, from_actor_id, gauge_class_job_id, data);
         }
 
-        if has_summoner_pet_transition {
+        if has_summoner_pet_transition
+            && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+        {
             let mut data = data.lock();
             let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                 return;
             };
             let mut network = network.lock();
-            let _ = summoner::spawn_pet_after_action(
+            actors.spawn_pet_after_action(
                 &mut network,
                 instance,
                 from_actor_id,
                 resolved_request.action_id,
                 resolved_request.target.object_id,
             );
-            if summoner::is_demi_summon(resolved_request.action_id) {
-                summoner::schedule_demi_auto_attack(instance, from_actor_id);
+            if actors.is_demi_summon(resolved_request.action_id) {
+                actors.schedule_demi_auto_attack(instance, from_actor_id);
             }
         }
 
@@ -1981,8 +1990,10 @@ pub fn execute_action(
         // gesture/VFX) has been sent, actually spawn the pet so it appears with animation.
         if summon_pet_after {
             let mut data = data.lock();
-            if let Some(instance) = data.find_actor_instance_mut(from_actor_id) {
-                summoner::apply_summon_pet_effect(network.clone(), instance, from_actor_id);
+            if let Some(instance) = data.find_actor_instance_mut(from_actor_id)
+                && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+            {
+                actors.apply_summon_pet_effect(network.clone(), instance, from_actor_id);
             }
         }
 
