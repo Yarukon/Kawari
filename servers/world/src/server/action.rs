@@ -1606,9 +1606,8 @@ pub fn execute_action(
             } else {
                 0
             };
-            if bard::is_bard(class_job)
-                && let Some((status_id, param, duration)) =
-                    bard::party_buff_for_action(resolved_request.action_id, coda_bonus)
+            if let Some((status_id, param, duration)) = job_for(class_job)
+                .and_then(|job| job.party_buff_for_action(resolved_request.action_id, coda_bonus))
             {
                 // Radiant Finale only: stamp the coda bonus onto the caster's own GainEffectSelf
                 // entry so the param-based read-site scales the caster too. Battle Voice's self
