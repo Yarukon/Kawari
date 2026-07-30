@@ -472,6 +472,9 @@ pub enum ToServer {
     MoveToPopRange(ClientId, ObjectId, u32, bool),
     /// Control the player's currently summoned pet.
     PetCommand(ClientId, ObjectId, PetCommand),
+    /// A player switched away from a job; tear down that job's persistent actors.
+    /// `old_class` is frozen at send time (the actor's live class_job may already be the new class).
+    JobDeactivated(ClientId, ObjectId, u8),
     /// The connection sent a direct message to another client. This needs the sender's actor id too for purposes of `send_ipc_from`.
     TellMessageSent(ObjectId, ObjectId, TellMessage),
     /// The client invited another player to join their party, friend list, or free company.
@@ -670,6 +673,7 @@ impl ToServer {
             Self::ActorDespawnsMinion(..) => "ActorDespawnsMinion",
             Self::MoveToPopRange(..) => "MoveToPopRange",
             Self::PetCommand(..) => "PetCommand",
+            Self::JobDeactivated(..) => "JobDeactivated",
             Self::TellMessageSent(..) => "TellMessageSent",
             Self::InvitePlayerTo(..) => "InvitePlayerTo",
             Self::InvitationResponse(..) => "InvitationResponse",

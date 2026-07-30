@@ -2251,6 +2251,14 @@ pub async fn server_main_loop(
                         );
                     }
                 }
+                ToServer::JobDeactivated(_from_id, owner, old_class) => {
+                    // Handler fleshed out in a later step; stubbed to keep the match exhaustive.
+                    tracing::debug!(
+                        "Job deactivated for actor {} (old class {}) — no-op stub",
+                        owner,
+                        old_class
+                    );
+                }
                 ToServer::ClientTrigger(from_id, from_actor_id, trigger) => {
                     match &trigger.trigger {
                         ClientTriggerCommand::TeleportQuery { aetheryte_id, .. } => {
