@@ -20,7 +20,7 @@ use crate::{
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
         jobs::{
-            dispatch::{Job, JobActionUpdate, job_for},
+            dispatch::{Job, JobActionUpdate, job_for, send_job_gauge_update},
             summoner,
         },
         network::{DestinationNetwork, NetworkState},
@@ -273,20 +273,6 @@ fn outgoing_damage_multiplier(has_feint: bool, has_addle: bool, damage_type: Dam
     }
 
     multiplier
-}
-
-fn send_job_gauge_update(
-    network: &mut NetworkState,
-    from_actor_id: ObjectId,
-    classjob_id: u8,
-    data: u64,
-) {
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
-    network.send_to_by_actor_id(
-        from_actor_id,
-        FromServer::PacketSegment(ipc, from_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
 }
 
 /// Maximum number of targets a single `ActionEffect32` packet can carry. Targets beyond this are

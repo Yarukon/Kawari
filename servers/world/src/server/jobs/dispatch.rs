@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::FromServer;
 use crate::gamedata::GameData;
 use crate::lua::GaugeAction;
 use crate::server::actor::NetworkedActor;
@@ -18,9 +19,9 @@ use crate::server::combat_state::PlayerCombatState;
 use crate::server::instance::Instance;
 use crate::server::jobs::bard::Bard;
 use crate::server::jobs::summoner::Summoner;
-use crate::server::network::NetworkState;
+use crate::server::network::{DestinationNetwork, NetworkState};
 use kawari::common::ObjectId;
-use kawari::ipc::zone::{ActionRequest, TargetEffect};
+use kawari::ipc::zone::{ActionRequest, ServerZoneIpcData, ServerZoneIpcSegment, TargetEffect};
 
 /// Unified per-action state-update result. Superset of the two existing job structs; jobs that don't
 /// use a field leave it at `Default`.
@@ -193,6 +194,22 @@ pub(in crate::server) fn job_for(class_job: u8) -> Option<&'static dyn Job> {
         cj if SUMMONER.class_jobs().contains(&cj) => Some(SUMMONER),
         _ => None,
     }
+}
+
+/// Send an `ActorGauge` packet carrying this job's freshly-built gauge tail. Shared by every job
+/// (folded from the former per-module copies in `action.rs` / `summoner.rs`).
+pub(in crate::server) fn send_job_gauge_update(
+    network: &mut NetworkState,
+    from_actor_id: ObjectId,
+    classjob_id: u8,
+    data: u64,
+) {
+    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
+    network.send_to_by_actor_id(
+        from_actor_id,
+        FromServer::PacketSegment(ipc, from_actor_id),
+        DestinationNetwork::ZoneClients,
+    );
 }
 
 #[cfg(test)]
