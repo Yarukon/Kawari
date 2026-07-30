@@ -19,7 +19,11 @@ use crate::{
         combat_state::PlayerCombatState,
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
-        jobs::{bard, dispatch::job_for, summoner},
+        jobs::{
+            bard,
+            dispatch::{JobActionUpdate, job_for},
+            summoner,
+        },
         network::{DestinationNetwork, NetworkState},
         set_character_mode, set_shared_group_timeline_state,
     },
@@ -1142,8 +1146,8 @@ pub fn execute_action(
         }
 
         let cleared_cooldown_groups;
-        let summoner_gauge_data;
-        let bard_gauge_data;
+        // Unified per-job gauge send: `Some((gauge_class_job_id, gauge_data))` or `None`.
+        let job_gauge_data;
         let bard_action_update;
         // Sampled inside the data block below, read by the LoseEffect loop further down.
         let lost_statuses: Vec<u16>;
@@ -1575,42 +1579,20 @@ pub fn execute_action(
                 }
             }
 
-            summoner_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
-                && summoner::is_summoner(class_job)
+            job_gauge_data = if let Some(job) = job_for(class_job)
+                && let Some(actor) = instance.find_actor_mut(from_actor_id)
             {
-                summoner::update_summoner_state_after_action(
-                    resolved_request.action_id,
-                    actor,
-                    from_actor_id,
-                );
+                bard_action_update =
+                    job.update_state_after_action(resolved_request.action_id, actor, from_actor_id);
                 let level = actor.get_common_spawn().level;
                 if let NetworkedActor::Player { combat_state, .. } = actor {
-                    Some(summoner::build_summoner_gauge_data(combat_state, level))
+                    job.build_gauge_data(combat_state, level)
+                        .map(|data| (job.gauge_class_job_id(class_job), data))
                 } else {
                     None
                 }
             } else {
-                None
-            };
-
-            bard_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
-                && bard::is_bard(class_job)
-            {
-                let action_update = bard::update_bard_state_after_action(
-                    resolved_request.action_id,
-                    actor,
-                    from_actor_id,
-                );
-                let level = actor.get_common_spawn().level;
-                let gauge_data = if let NetworkedActor::Player { combat_state, .. } = actor {
-                    Some(bard::build_bard_gauge_data(combat_state, level))
-                } else {
-                    None
-                };
-                bard_action_update = action_update;
-                gauge_data
-            } else {
-                bard_action_update = bard::BardActionUpdate::default();
+                bard_action_update = JobActionUpdate::default();
                 None
             };
 
@@ -1971,19 +1953,9 @@ pub fn execute_action(
             }
         }
 
-        if let Some(data) = summoner_gauge_data {
+        if let Some((gauge_class_job_id, data)) = job_gauge_data {
             let mut network = network.lock();
-            send_job_gauge_update(&mut network, from_actor_id, class_job, data);
-        }
-
-        if let Some(data) = bard_gauge_data {
-            let mut network = network.lock();
-            send_job_gauge_update(
-                &mut network,
-                from_actor_id,
-                bard::gauge_class_job_id(),
-                data,
-            );
+            send_job_gauge_update(&mut network, from_actor_id, gauge_class_job_id, data);
         }
 
         if has_summoner_pet_transition {
