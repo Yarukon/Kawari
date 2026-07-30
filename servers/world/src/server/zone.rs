@@ -19,10 +19,7 @@ use crate::{
         NetworkedActor, WorldServer,
         combat_state::PlayerCombatState,
         instance::{Instance, QueuedTaskData},
-        jobs::{
-            bard::{build_bard_gauge_data, gauge_class_job_id, is_bard},
-            summoner::{apply_summon_pet_effect, build_summoner_gauge_data, is_summoner},
-        },
+        jobs::dispatch::{Job, job_for},
         network::{DestinationNetwork, NetworkState},
     },
     zone_connection::BaseParameters,
@@ -1344,19 +1341,11 @@ pub fn handle_zone_messages(
             // whether a pet was summoned, and (for jobs with one) the job-gauge bytes to re-send so
             // the gauge shows immediately instead of staying blank until the next action.
             let had_pet = combat_state.summoner.carbuncle_summoned;
-            let gauge_data = if is_summoner(player_spawn.common.class_job) {
-                Some((
-                    player_spawn.common.class_job,
-                    build_summoner_gauge_data(&combat_state, player_spawn.common.level),
-                ))
-            } else if is_bard(player_spawn.common.class_job) {
-                Some((
-                    gauge_class_job_id(),
-                    build_bard_gauge_data(&combat_state, player_spawn.common.level),
-                ))
-            } else {
-                None
-            };
+            let class_job = player_spawn.common.class_job;
+            let gauge_data = job_for(class_job).and_then(|job| {
+                job.build_gauge_data(&combat_state, player_spawn.common.level)
+                    .map(|data| (job.gauge_class_job_id(class_job), data))
+            });
 
             *instance.find_actor_mut(*from_actor_id).unwrap() = NetworkedActor::Player {
                 spawn: player_spawn.clone(),
@@ -1387,8 +1376,9 @@ pub fn handle_zone_messages(
                             if spawn.common.owner_id == *from_actor_id
                     )
                 })
+                && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
             {
-                apply_summon_pet_effect(network.clone(), instance, *from_actor_id);
+                actors.apply_summon_pet_effect(network.clone(), instance, *from_actor_id);
             }
 
             // Re-send the job gauge so the carried-over state shows immediately (the zone-in setup

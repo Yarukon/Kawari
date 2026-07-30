@@ -21,6 +21,9 @@ use crate::{
             SummonerState,
         },
         instance::{Instance, QueuedTaskData},
+        jobs::dispatch::{
+            Job, JobActionUpdate, JobActors, JobRefreshResult, send_job_gauge_update,
+        },
         network::{DestinationNetwork, NetworkState},
         set_character_mode,
     },
@@ -270,20 +273,6 @@ struct DemiAutoAttackPlan {
     target_id: ObjectId,
     action_id: u32,
     potency: u32,
-}
-
-fn send_job_gauge_update(
-    network: &mut NetworkState,
-    from_actor_id: ObjectId,
-    classjob_id: u8,
-    data: u64,
-) {
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
-    network.send_to_by_actor_id(
-        from_actor_id,
-        FromServer::PacketSegment(ipc, from_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
 }
 
 fn send_summoner_pet_parameters(network: &mut NetworkState, owner_actor_id: ObjectId, pet_id: u32) {
@@ -2770,6 +2759,145 @@ pub(crate) fn apply_gauge_action(combat_state: &mut PlayerCombatState, action: &
             combat_state.summoner.aetherflow_stacks = stacks.clamp(0, MAX_AETHERFLOW as i32) as u8;
         }
         other => tracing::warn!("modify_gauge: unknown gauge index {other}"),
+    }
+}
+
+/// Summoner job dispatch handle. Zero-sized; all state lives in `PlayerCombatState::summoner`. Every
+/// method delegates to the existing free fn so dispatch introduces no behavior change. The pet/VFX/
+/// task subsystem lives behind the separate `JobActors` seam (see below), reached via
+/// `persistent_actors`.
+pub(in crate::server) struct Summoner;
+
+impl Job for Summoner {
+    fn class_jobs(&self) -> &'static [u8] {
+        &[CLASSJOB_SUMMONER]
+    }
+
+    fn resolve_action(
+        &self,
+        request: &ActionRequest,
+        combat_state: &PlayerCombatState,
+        level: u8,
+        game_data: &mut GameData,
+    ) -> u32 {
+        resolve_summoner_action(request, combat_state, level, game_data)
+    }
+
+    fn can_execute(&self, action_id: u32, combat_state: &PlayerCombatState, level: u8) -> bool {
+        can_execute_summoner_action(action_id, combat_state, level)
+    }
+
+    fn apply_gauge_action(&self, combat_state: &mut PlayerCombatState, action: &GaugeAction) {
+        apply_gauge_action(combat_state, action);
+    }
+
+    fn update_state_after_action(
+        &self,
+        action_id: u32,
+        actor: &mut NetworkedActor,
+        owner_actor_id: ObjectId,
+    ) -> JobActionUpdate {
+        update_summoner_state_after_action(action_id, actor, owner_actor_id);
+        JobActionUpdate::default()
+    }
+
+    fn build_gauge_data(&self, combat_state: &PlayerCombatState, level: u8) -> Option<u64> {
+        Some(build_summoner_gauge_data(combat_state, level))
+    }
+
+    fn refresh_runtime_state_on_actor(
+        &self,
+        owner_actor_id: ObjectId,
+        actor: &mut NetworkedActor,
+    ) -> JobRefreshResult {
+        let result = refresh_summoner_runtime_state_on_actor(owner_actor_id, actor);
+        JobRefreshResult {
+            changed: result.changed,
+            status_timer_refreshed: result.status_timer_refreshed,
+            demi_just_ended: result.demi_just_ended,
+            cooldown_update: None,
+        }
+    }
+
+    fn persistent_actors(&self) -> Option<&dyn JobActors> {
+        Some(&Summoner)
+    }
+}
+
+impl JobActors for Summoner {
+    fn has_pet_transition_for_action(&self, action_id: u32) -> bool {
+        has_pet_transition_for_action(action_id)
+    }
+
+    fn augment_action_result_effects(&self, action_id: u32, effects: &mut Vec<TargetEffect>) {
+        augment_action_result_effects(action_id, effects);
+    }
+
+    fn sync_pet_for_mount(
+        &self,
+        network: &mut NetworkState,
+        instance: &mut Instance,
+        owner: ObjectId,
+    ) {
+        sync_pet_for_mount(network, instance, owner);
+    }
+
+    fn register_lingering_aoe_after_action(
+        &self,
+        instance: &mut Instance,
+        owner: ObjectId,
+        action_id: u32,
+        target: ObjectId,
+    ) {
+        register_slipstream_lingering_aoe_after_action(instance, owner, action_id, target);
+    }
+
+    fn prepare_pet_transition_for_action(
+        &self,
+        network: &mut NetworkState,
+        instance: &mut Instance,
+        owner: ObjectId,
+        action_id: u32,
+    ) {
+        prepare_pet_transition_for_action(network, instance, owner, action_id);
+    }
+
+    fn spawn_pet_after_action(
+        &self,
+        network: &mut NetworkState,
+        instance: &mut Instance,
+        owner: ObjectId,
+        action_id: u32,
+        target: ObjectId,
+    ) {
+        spawn_pet_after_action(network, instance, owner, action_id, target);
+    }
+
+    fn is_demi_summon(&self, action_id: u32) -> bool {
+        is_demi_summon(action_id)
+    }
+
+    fn schedule_demi_auto_attack(&self, instance: &mut Instance, owner: ObjectId) {
+        schedule_demi_auto_attack(instance, owner);
+    }
+
+    fn apply_summon_pet_effect(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+    ) {
+        apply_summon_pet_effect(network, instance, owner);
+    }
+
+    fn on_demi_expired(
+        &self,
+        network: &mut NetworkState,
+        instance: &mut Instance,
+        owner: ObjectId,
+        gauge_update: Option<(u8, u64)>,
+    ) {
+        apply_demi_summon_revert(network, instance, owner, gauge_update);
     }
 }
 

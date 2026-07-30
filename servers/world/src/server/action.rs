@@ -19,7 +19,10 @@ use crate::{
         combat_state::PlayerCombatState,
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
-        jobs::{bard, summoner},
+        jobs::{
+            dispatch::{Job, JobActionUpdate, job_for, send_job_gauge_update},
+            summoner,
+        },
         network::{DestinationNetwork, NetworkState},
         set_character_mode, set_shared_group_timeline_state,
     },
@@ -270,20 +273,6 @@ fn outgoing_damage_multiplier(has_feint: bool, has_addle: bool, damage_type: Dam
     }
 
     multiplier
-}
-
-fn send_job_gauge_update(
-    network: &mut NetworkState,
-    from_actor_id: ObjectId,
-    classjob_id: u8,
-    data: u64,
-) {
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
-    network.send_to_by_actor_id(
-        from_actor_id,
-        FromServer::PacketSegment(ipc, from_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
 }
 
 /// Maximum number of targets a single `ActionEffect32` packet can carry. Targets beyond this are
@@ -716,31 +705,18 @@ fn resolve_player_action_id(
     let class_job = actor.get_common_spawn().class_job;
     let level = actor.get_common_spawn().level;
     let resolved_action_id = if request.action_type == ActionType::Action
-        && summoner::is_summoner(class_job)
+        && let Some(job) = job_for(class_job)
     {
-        let resolved = summoner::resolve_summoner_action(request, combat_state, level, game_data);
-        if !summoner::can_execute_summoner_action(resolved, combat_state, level) {
+        let resolved = job.resolve_action(request, combat_state, level, game_data);
+        if !job.can_execute(resolved, combat_state, level) {
             tracing::warn!(
                 ?actor_id,
                 action_id = request.action_id,
                 resolved_action_id = resolved,
                 level,
-                state = ?combat_state.summoner,
-                "Rejected Summoner action because the current job state does not allow it",
-            );
-            return None;
-        }
-        resolved
-    } else if request.action_type == ActionType::Action && bard::is_bard(class_job) {
-        let resolved = bard::resolve_bard_action(request, combat_state, level, game_data);
-        if !bard::can_execute_bard_action(resolved, combat_state, level) {
-            tracing::warn!(
-                ?actor_id,
-                action_id = request.action_id,
-                resolved_action_id = resolved,
-                level,
-                state = ?combat_state.bard,
-                "Rejected Bard action because the current job state does not allow it",
+                summoner_state = ?combat_state.summoner,
+                bard_state = ?combat_state.bard,
+                "Rejected job action because the current job state does not allow it",
             );
             return None;
         }
@@ -1039,7 +1015,12 @@ pub fn execute_action(
             return;
         };
         let mut network = network.lock();
-        summoner::sync_pet_for_mount(&mut network, instance, from_actor_id);
+        let class_job = instance
+            .find_actor(from_actor_id)
+            .map(|actor| actor.get_common_spawn().class_job);
+        if let Some(actors) = class_job.and_then(job_for).and_then(Job::persistent_actors) {
+            actors.sync_pet_for_mount(&mut network, instance, from_actor_id);
+        }
         return;
     }
 
@@ -1155,8 +1136,8 @@ pub fn execute_action(
         }
 
         let cleared_cooldown_groups;
-        let summoner_gauge_data;
-        let bard_gauge_data;
+        // Unified per-job gauge send: `Some((gauge_class_job_id, gauge_data))` or `None`.
+        let job_gauge_data;
         let bard_action_update;
         // Sampled inside the data block below, read by the LoseEffect loop further down.
         let lost_statuses: Vec<u16>;
@@ -1175,8 +1156,9 @@ pub fn execute_action(
         // Whether this action summons a generic carbuncle; the spawn is deferred until after the
         // result packet so the client plays the summon animation before the pet appears.
         let mut summon_pet_after = false;
-        let has_summoner_pet_transition =
-            summoner::has_pet_transition_for_action(resolved_request.action_id);
+        let has_summoner_pet_transition = job_for(class_job)
+            .and_then(Job::persistent_actors)
+            .is_some_and(|actors| actors.has_pet_transition_for_action(resolved_request.action_id));
 
         {
             let mut data = data.lock();
@@ -1269,8 +1251,8 @@ pub fn execute_action(
                     }));
             }
 
-            if summoner::is_summoner(class_job) {
-                summoner::augment_action_result_effects(
+            if let Some(actors) = job_for(class_job).and_then(Job::persistent_actors) {
+                actors.augment_action_result_effects(
                     resolved_request.action_id,
                     &mut effects_builder.effects,
                 );
@@ -1480,16 +1462,9 @@ pub fn execute_action(
                 && let Some(NetworkedActor::Player { combat_state, .. }) =
                     instance.find_actor_mut(from_actor_id)
             {
-                for gauge_action in &effects_builder.gauge_actions {
-                    if summoner::is_summoner(class_job) {
-                        summoner::apply_gauge_action(combat_state, gauge_action);
-                    }
-                    if bard::is_bard(class_job) {
-                        bard::apply_bard_gauge_action(
-                            combat_state,
-                            gauge_action.index,
-                            gauge_action.amount,
-                        );
+                if let Some(job) = job_for(class_job) {
+                    for gauge_action in &effects_builder.gauge_actions {
+                        job.apply_gauge_action(combat_state, gauge_action);
                     }
                 }
             }
@@ -1595,42 +1570,20 @@ pub fn execute_action(
                 }
             }
 
-            summoner_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
-                && summoner::is_summoner(class_job)
+            job_gauge_data = if let Some(job) = job_for(class_job)
+                && let Some(actor) = instance.find_actor_mut(from_actor_id)
             {
-                summoner::update_summoner_state_after_action(
-                    resolved_request.action_id,
-                    actor,
-                    from_actor_id,
-                );
+                bard_action_update =
+                    job.update_state_after_action(resolved_request.action_id, actor, from_actor_id);
                 let level = actor.get_common_spawn().level;
                 if let NetworkedActor::Player { combat_state, .. } = actor {
-                    Some(summoner::build_summoner_gauge_data(combat_state, level))
+                    job.build_gauge_data(combat_state, level)
+                        .map(|data| (job.gauge_class_job_id(class_job), data))
                 } else {
                     None
                 }
             } else {
-                None
-            };
-
-            bard_gauge_data = if let Some(actor) = instance.find_actor_mut(from_actor_id)
-                && bard::is_bard(class_job)
-            {
-                let action_update = bard::update_bard_state_after_action(
-                    resolved_request.action_id,
-                    actor,
-                    from_actor_id,
-                );
-                let level = actor.get_common_spawn().level;
-                let gauge_data = if let NetworkedActor::Player { combat_state, .. } = actor {
-                    Some(bard::build_bard_gauge_data(combat_state, level))
-                } else {
-                    None
-                };
-                bard_action_update = action_update;
-                gauge_data
-            } else {
-                bard_action_update = bard::BardActionUpdate::default();
+                bard_action_update = JobActionUpdate::default();
                 None
             };
 
@@ -1644,9 +1597,8 @@ pub fn execute_action(
             } else {
                 0
             };
-            if bard::is_bard(class_job)
-                && let Some((status_id, param, duration)) =
-                    bard::party_buff_for_action(resolved_request.action_id, coda_bonus)
+            if let Some((status_id, param, duration)) = job_for(class_job)
+                .and_then(|job| job.party_buff_for_action(resolved_request.action_id, coda_bonus))
             {
                 // Radiant Finale only: stamp the coda bonus onto the caster's own GainEffectSelf
                 // entry so the param-based read-site scales the caster too. Battle Voice's self
@@ -1710,12 +1662,14 @@ pub fn execute_action(
             if from_actor_id != resolved_request.target.object_id && action_mp_cost > 0 {
                 update_actor_hp_mp(network.clone(), instance, from_actor_id);
             }
-            summoner::register_slipstream_lingering_aoe_after_action(
-                instance,
-                from_actor_id,
-                resolved_request.action_id,
-                resolved_request.target.object_id,
-            );
+            if let Some(actors) = job_for(class_job).and_then(Job::persistent_actors) {
+                actors.register_lingering_aoe_after_action(
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                    resolved_request.target.object_id,
+                );
+            }
             if consume_swiftcast {
                 remove_status_from_actor_instance(instance, from_actor_id, STATUS_SWIFTCAST);
             }
@@ -1751,13 +1705,15 @@ pub fn execute_action(
             }
         }
 
-        if has_summoner_pet_transition {
+        if has_summoner_pet_transition
+            && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+        {
             let mut data = data.lock();
             let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                 return;
             };
             let mut network = network.lock();
-            summoner::prepare_pet_transition_for_action(
+            actors.prepare_pet_transition_for_action(
                 &mut network,
                 instance,
                 from_actor_id,
@@ -1991,36 +1947,28 @@ pub fn execute_action(
             }
         }
 
-        if let Some(data) = summoner_gauge_data {
+        if let Some((gauge_class_job_id, data)) = job_gauge_data {
             let mut network = network.lock();
-            send_job_gauge_update(&mut network, from_actor_id, class_job, data);
+            send_job_gauge_update(&mut network, from_actor_id, gauge_class_job_id, data);
         }
 
-        if let Some(data) = bard_gauge_data {
-            let mut network = network.lock();
-            send_job_gauge_update(
-                &mut network,
-                from_actor_id,
-                bard::gauge_class_job_id(),
-                data,
-            );
-        }
-
-        if has_summoner_pet_transition {
+        if has_summoner_pet_transition
+            && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+        {
             let mut data = data.lock();
             let Some(instance) = data.find_actor_instance_mut(from_actor_id) else {
                 return;
             };
             let mut network = network.lock();
-            let _ = summoner::spawn_pet_after_action(
+            actors.spawn_pet_after_action(
                 &mut network,
                 instance,
                 from_actor_id,
                 resolved_request.action_id,
                 resolved_request.target.object_id,
             );
-            if summoner::is_demi_summon(resolved_request.action_id) {
-                summoner::schedule_demi_auto_attack(instance, from_actor_id);
+            if actors.is_demi_summon(resolved_request.action_id) {
+                actors.schedule_demi_auto_attack(instance, from_actor_id);
             }
         }
 
@@ -2028,8 +1976,10 @@ pub fn execute_action(
         // gesture/VFX) has been sent, actually spawn the pet so it appears with animation.
         if summon_pet_after {
             let mut data = data.lock();
-            if let Some(instance) = data.find_actor_instance_mut(from_actor_id) {
-                summoner::apply_summon_pet_effect(network.clone(), instance, from_actor_id);
+            if let Some(instance) = data.find_actor_instance_mut(from_actor_id)
+                && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
+            {
+                actors.apply_summon_pet_effect(network.clone(), instance, from_actor_id);
             }
         }
 

@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     StatusEffects,
     gamedata::GameData,
-    server::{actor::NetworkedActor, combat_state::PlayerCombatState},
+    lua::GaugeAction,
+    server::{
+        actor::NetworkedActor,
+        combat_state::PlayerCombatState,
+        jobs::dispatch::{Job, JobActionUpdate, JobCooldownUpdate, JobRefreshResult},
+    },
 };
 use kawari::{common::ObjectId, ipc::zone::ActionRequest};
 
@@ -1425,6 +1430,87 @@ mod tests {
                 None,
                 "action {action_id}"
             );
+        }
+    }
+}
+
+/// Bard job dispatch handle. Zero-sized; all state lives in `PlayerCombatState::bard`. Every method
+/// delegates to the existing free fn above so dispatch introduces no behavior change.
+pub(in crate::server) struct Bard;
+
+impl From<BardCooldownUpdate> for JobCooldownUpdate {
+    fn from(value: BardCooldownUpdate) -> Self {
+        JobCooldownUpdate {
+            cooldown_group: value.cooldown_group,
+            delta_centisec: value.delta_centisec,
+        }
+    }
+}
+
+impl Job for Bard {
+    fn class_jobs(&self) -> &'static [u8] {
+        &[CLASSJOB_BARD, CLASSJOB_CATEGORY_BARD]
+    }
+
+    fn gauge_class_job_id(&self, _dispatch_class_job: u8) -> u8 {
+        gauge_class_job_id()
+    }
+
+    fn resolve_action(
+        &self,
+        request: &ActionRequest,
+        combat_state: &PlayerCombatState,
+        level: u8,
+        game_data: &mut GameData,
+    ) -> u32 {
+        resolve_bard_action(request, combat_state, level, game_data)
+    }
+
+    fn can_execute(&self, action_id: u32, combat_state: &PlayerCombatState, level: u8) -> bool {
+        can_execute_bard_action(action_id, combat_state, level)
+    }
+
+    fn apply_gauge_action(&self, combat_state: &mut PlayerCombatState, action: &GaugeAction) {
+        apply_bard_gauge_action(combat_state, action.index, action.amount);
+    }
+
+    fn update_state_after_action(
+        &self,
+        action_id: u32,
+        actor: &mut NetworkedActor,
+        owner_actor_id: ObjectId,
+    ) -> JobActionUpdate {
+        let update = update_bard_state_after_action(action_id, actor, owner_actor_id);
+        JobActionUpdate {
+            changed: update.changed,
+            status_timer_refreshed: update.status_timer_refreshed,
+            cooldown_update: update.cooldown_update.map(JobCooldownUpdate::from),
+        }
+    }
+
+    fn build_gauge_data(&self, combat_state: &PlayerCombatState, level: u8) -> Option<u64> {
+        Some(build_bard_gauge_data(combat_state, level))
+    }
+
+    fn party_buff_for_action(
+        &self,
+        action_id: u32,
+        radiant_finale_bonus_percent: u8,
+    ) -> Option<(u16, u16, f32)> {
+        party_buff_for_action(action_id, radiant_finale_bonus_percent)
+    }
+
+    fn refresh_runtime_state_on_actor(
+        &self,
+        owner_actor_id: ObjectId,
+        actor: &mut NetworkedActor,
+    ) -> JobRefreshResult {
+        let result = refresh_bard_runtime_state_on_actor(owner_actor_id, actor);
+        JobRefreshResult {
+            changed: result.changed,
+            status_timer_refreshed: result.status_timer_refreshed,
+            demi_just_ended: false,
+            cooldown_update: result.cooldown_update.map(JobCooldownUpdate::from),
         }
     }
 }
