@@ -2466,6 +2466,7 @@ fn refresh_summoner_statuses(actor: &mut NetworkedActor, owner_actor_id: ObjectI
     status_effects.remove(STATUS_CRIMSON_STRIKE_READY);
 
     let smn = &combat_state.summoner;
+    let self_source = owner_actor_id;
     if smn.further_ruin > 0 {
         let remaining = smn
             .further_ruin_expires_at
@@ -2475,15 +2476,14 @@ fn refresh_summoner_statuses(actor: &mut NetworkedActor, owner_actor_id: ObjectI
                     .as_secs_f32()
             })
             .unwrap_or(0.0);
-        status_effects.add(STATUS_FURTHER_RUIN, 0, remaining);
+        status_effects.add_with_source(STATUS_FURTHER_RUIN, 0, remaining, self_source);
     }
     if let Some(expires_at) = smn.searing_light_expires_at {
         let remaining = expires_at
             .saturating_duration_since(Instant::now())
             .as_secs_f32();
-        status_effects.add(STATUS_SEARING_LIGHT, 0, remaining);
+        status_effects.add_with_source(STATUS_SEARING_LIGHT, 0, remaining, self_source);
     }
-    let self_source = owner_actor_id;
 
     if smn.searing_flash_ready {
         let remaining = smn
