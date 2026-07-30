@@ -20,8 +20,7 @@ use crate::{
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
         jobs::{
-            bard,
-            dispatch::{JobActionUpdate, job_for},
+            dispatch::{Job, JobActionUpdate, job_for},
             summoner,
         },
         network::{DestinationNetwork, NetworkState},
@@ -1166,8 +1165,9 @@ pub fn execute_action(
         // Whether this action summons a generic carbuncle; the spawn is deferred until after the
         // result packet so the client plays the summon animation before the pet appears.
         let mut summon_pet_after = false;
-        let has_summoner_pet_transition =
-            summoner::has_pet_transition_for_action(resolved_request.action_id);
+        let has_summoner_pet_transition = job_for(class_job)
+            .and_then(Job::persistent_actors)
+            .is_some_and(|actors| actors.has_pet_transition_for_action(resolved_request.action_id));
 
         {
             let mut data = data.lock();
@@ -1260,8 +1260,8 @@ pub fn execute_action(
                     }));
             }
 
-            if summoner::is_summoner(class_job) {
-                summoner::augment_action_result_effects(
+            if let Some(actors) = job_for(class_job).and_then(Job::persistent_actors) {
+                actors.augment_action_result_effects(
                     resolved_request.action_id,
                     &mut effects_builder.effects,
                 );
@@ -1671,12 +1671,14 @@ pub fn execute_action(
             if from_actor_id != resolved_request.target.object_id && action_mp_cost > 0 {
                 update_actor_hp_mp(network.clone(), instance, from_actor_id);
             }
-            summoner::register_slipstream_lingering_aoe_after_action(
-                instance,
-                from_actor_id,
-                resolved_request.action_id,
-                resolved_request.target.object_id,
-            );
+            if let Some(actors) = job_for(class_job).and_then(Job::persistent_actors) {
+                actors.register_lingering_aoe_after_action(
+                    instance,
+                    from_actor_id,
+                    resolved_request.action_id,
+                    resolved_request.target.object_id,
+                );
+            }
             if consume_swiftcast {
                 remove_status_from_actor_instance(instance, from_actor_id, STATUS_SWIFTCAST);
             }
