@@ -955,8 +955,21 @@ impl ZoneConnection {
             return;
         }
 
+        // The class genuinely changes here (equal case returned above). Capture the old class
+        // before the overwrite so the server can tear down its persistent actors.
+        let old = self.player_data.classjob.current_class as u8;
+
         self.player_data.classjob.current_class = new_class as i32;
         assert!(self.player_data.classjob.current_class != 0); // If this is 0, then something went seriously wrong.
+
+        // Despawn the old job's persistent actors (e.g. Summoner pets) on the server thread.
+        self.handle
+            .send(ToServer::JobDeactivated(
+                self.id,
+                self.player_data.character.actor_id,
+                old,
+            ))
+            .await;
 
         self.update_class_info().await;
         self.finish_changing_class().await;
@@ -979,8 +992,21 @@ impl ZoneConnection {
                     return;
                 }
 
+                // The class genuinely changes here (equal case returned above). Capture the old
+                // class before the overwrite so the server can tear down its persistent actors.
+                let old = self.player_data.classjob.current_class as u8;
+
                 self.player_data.classjob.current_class = classjob_id as i32;
                 assert!(self.player_data.classjob.current_class != 0); // If this is 0, then something went seriously wrong.
+
+                // Despawn the old job's persistent actors (e.g. Summoner pets) on the server thread.
+                self.handle
+                    .send(ToServer::JobDeactivated(
+                        self.id,
+                        self.player_data.character.actor_id,
+                        old,
+                    ))
+                    .await;
 
                 self.update_class_info().await;
                 self.finish_changing_class().await;

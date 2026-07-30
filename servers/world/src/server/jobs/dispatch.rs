@@ -187,6 +187,17 @@ pub(in crate::server) trait JobActors: Sync {
         owner: ObjectId,
         gauge_update: Option<(u8, u64)>,
     );
+
+    /// The owner switched away from this job — tear down its persistent actors (pets/VFX) and clear
+    /// any re-summon flags. Defaulted no-op: jobs that own no persistent-actor lifecycle opt out.
+    /// Summoner overrides this to kill live pets and clear `carbuncle_summoned`.
+    fn on_job_deactivated(
+        &self,
+        _network: &mut NetworkState,
+        _instance: &mut Instance,
+        _owner: ObjectId,
+    ) {
+    }
 }
 
 /// The single per-job growth point. One arm per job; everything else is closed to extension.

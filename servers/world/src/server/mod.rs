@@ -2251,6 +2251,16 @@ pub async fn server_main_loop(
                         );
                     }
                 }
+                ToServer::JobDeactivated(_from_id, owner, old_class) => {
+                    let mut data = data.lock();
+                    if let Some(instance) = data.find_actor_instance_mut(owner)
+                        && let Some(actors) =
+                            job_for(old_class).and_then(|job| job.persistent_actors())
+                    {
+                        let mut network = network.lock();
+                        actors.on_job_deactivated(&mut network, instance, owner);
+                    }
+                }
                 ToServer::ClientTrigger(from_id, from_actor_id, trigger) => {
                     match &trigger.trigger {
                         ClientTriggerCommand::TeleportQuery { aetheryte_id, .. } => {

@@ -2901,6 +2901,18 @@ impl JobActors for Summoner {
     ) {
         apply_demi_summon_revert(network, instance, owner, gauge_update);
     }
+
+    fn on_job_deactivated(
+        &self,
+        network: &mut NetworkState,
+        instance: &mut Instance,
+        owner: ObjectId,
+    ) {
+        kill_live_summoner_pets_for_transition(network, instance, owner);
+        if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(owner) {
+            combat_state.summoner.carbuncle_summoned = false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2997,5 +3009,85 @@ mod tests {
         assert_eq!(smn.attunement_expires_at, None);
         // ...but the earned proc persists.
         assert!(smn.mountain_buster_ready);
+    }
+
+    /// Switching away from Summoner must tear down every live pet the owner has out and clear the
+    /// re-summon flag, so the pet doesn't linger in the instance and doesn't get re-spawned on the
+    /// new (non-SMN) job's zone-in. `kill_live_summoner_pets_for_transition` is the pet-killing half;
+    /// `Summoner::on_job_deactivated` also clears `carbuncle_summoned`.
+    #[test]
+    fn on_job_deactivated_kills_pets_and_clears_resummon_flag() {
+        use std::collections::{HashMap, VecDeque};
+
+        use crate::StatusEffects;
+        use kawari::common::Timeline;
+
+        // Insert an owned live pet directly (bypassing `insert_npc`, which loads a timeline file
+        // from disk that isn't present in the unit-test environment).
+        fn insert_owned_pet(instance: &mut Instance, id: ObjectId, owner: ObjectId) {
+            let mut spawn = SpawnNpc::default();
+            spawn.common.owner_id = owner;
+            instance.actors.insert(
+                id,
+                NetworkedActor::Npc {
+                    state: NpcState::natural_state_of(&spawn),
+                    navmesh_path: VecDeque::default(),
+                    navmesh_path_lerp: 0.0,
+                    navmesh_target: None,
+                    last_position: None,
+                    spawn_position: spawn.common.position.0,
+                    spawn,
+                    timeline: Timeline {
+                        autoattack_action_id: 0,
+                        timeline_always_plays: false,
+                        timepoints: Vec::new(),
+                        on_death: Vec::new(),
+                    },
+                    timeline_position: 0,
+                    hate_list: HashMap::new(),
+                    currently_invulnerable: false,
+                    ai_paused: false,
+                    targetable: true,
+                    visible: true,
+                    cast_locked: false,
+                    status_effects: StatusEffects::default(),
+                },
+            );
+        }
+
+        let owner = ObjectId(1);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+
+        // Owner player with the re-summon flag set (as if a pet is out).
+        instance.insert_empty_actor(owner);
+        if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(owner) {
+            combat_state.summoner.carbuncle_summoned = true;
+        }
+
+        // Two live pets owned by the player.
+        let pet_a = ObjectId(2);
+        let pet_b = ObjectId(3);
+        insert_owned_pet(&mut instance, pet_a, owner);
+        insert_owned_pet(&mut instance, pet_b, owner);
+
+        Summoner.on_job_deactivated(&mut network, &mut instance, owner);
+
+        // Both pets are dead...
+        for pet in [pet_a, pet_b] {
+            match instance.find_actor(pet) {
+                Some(NetworkedActor::Npc { state, .. }) => {
+                    assert_eq!(*state, NpcState::Dead, "pet {pet} should be dead")
+                }
+                other => panic!("expected an Npc pet, got {other:?}"),
+            }
+        }
+
+        // ...and the re-summon flag is cleared.
+        if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor(owner) {
+            assert!(!combat_state.summoner.carbuncle_summoned);
+        } else {
+            panic!("owner should still be a Player actor");
+        }
     }
 }
