@@ -26,7 +26,7 @@ use crate::{
         },
         effect::{handle_effect_messages, remove_effect, send_effects_list},
         instance::{Instance, NavmeshGenerationStep, QueuedTaskData},
-        jobs::{bard, summoner},
+        jobs::{dispatch::job_for, summoner},
         linkshell::handle_linkshell_messages,
         network::{DestinationNetwork, NetworkState},
         party::{
@@ -248,16 +248,16 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
         };
 
         let class_job = common.class_job;
-        if summoner::is_summoner(class_job) {
-            let result = summoner::refresh_summoner_runtime_state_on_actor(actor_id, actor);
-            let status_timer_refreshed = result.status_timer_refreshed;
-            let gauge_data = if result.changed {
+        if let Some(job) = job_for(class_job) {
+            let result = job.refresh_runtime_state_on_actor(actor_id, actor);
+            let gauge_update = if result.changed {
                 let level = actor
                     .common_spawn()
-                    .expect("summoner runtime actor has common spawn")
+                    .expect("runtime actor has common spawn")
                     .level;
                 if let NetworkedActor::Player { combat_state, .. } = actor {
-                    Some(summoner::build_summoner_gauge_data(combat_state, level))
+                    job.build_gauge_data(combat_state, level)
+                        .map(|data| (job.gauge_class_job_id(class_job), data))
                 } else {
                     None
                 }
@@ -265,13 +265,11 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
                 None
             };
 
-            if let Some(gauge_data) = gauge_data
+            if let Some((classjob_id, data)) = gauge_update
                 && !result.demi_just_ended
             {
-                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
-                    classjob_id: class_job,
-                    data: gauge_data,
-                });
+                let ipc =
+                    ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
                 network.send_to_by_actor_id(
                     actor_id,
                     FromServer::PacketSegment(ipc, actor_id),
@@ -281,41 +279,10 @@ fn refresh_runtime_job_state(instance: &mut Instance, network: &mut NetworkState
 
             // Demi window just expired this tick — retail kills/despawns the demi actor, clears the
             // demi hotbar, then re-spawns/re-binds carbuncle instead of only flipping UI state.
-            if result.demi_just_ended {
-                summoner::apply_demi_summon_revert(
-                    network,
-                    instance,
-                    actor_id,
-                    gauge_data.map(|data| (class_job, data)),
-                );
-            }
-
-            if status_timer_refreshed {
-                refreshed.push(actor_id);
-            }
-
-            continue;
-        }
-
-        if bard::is_bard(class_job) {
-            let result = bard::refresh_bard_runtime_state_on_actor(actor_id, actor);
-            let level = actor
-                .common_spawn()
-                .expect("bard runtime actor has common spawn")
-                .level;
-            if result.changed
-                && let NetworkedActor::Player { combat_state, .. } = actor
+            if result.demi_just_ended
+                && let Some(actors) = job.persistent_actors()
             {
-                let gauge_data = bard::build_bard_gauge_data(combat_state, level);
-                let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge {
-                    classjob_id: bard::gauge_class_job_id(),
-                    data: gauge_data,
-                });
-                network.send_to_by_actor_id(
-                    actor_id,
-                    FromServer::PacketSegment(ipc, actor_id),
-                    DestinationNetwork::ZoneClients,
-                );
+                actors.on_demi_expired(network, instance, actor_id, gauge_update);
             }
 
             if let Some(cooldown_update) = result.cooldown_update {
