@@ -15,6 +15,8 @@ use kawari::{
 use physis::equipment::EquipSlot;
 use strum::IntoEnumIterator;
 
+/// Reserved log-message ID for a dye/glamour result notification; awaiting a send-site.
+#[allow(dead_code)]
 const DYE_RESULT_LOG_MESSAGE: u32 = 0xBC77;
 
 /// Which materia slot a retrieval (拆) takes: the last melded one, or `None` if the item has none.

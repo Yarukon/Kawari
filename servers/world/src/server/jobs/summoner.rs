@@ -2001,7 +2001,9 @@ fn clear_egi_ready_state(smn: &mut SummonerState) {
 }
 
 fn clear_expired_attunement_ready_state(smn: &mut SummonerState) {
-    smn.mountain_buster_ready = false;
+    // Mountain Buster Ready is intentionally NOT cleared here: on retail the proc outlives the
+    // attunement window that spawned it, so it must survive the attunement timer lapsing and is
+    // only cleared when consumed (Mountain Buster) or overwritten by a fresh summon.
     smn.crimson_cyclone_ready = false;
     smn.crimson_strike_ready = false;
 }
@@ -2466,6 +2468,7 @@ fn refresh_summoner_statuses(actor: &mut NetworkedActor, owner_actor_id: ObjectI
     status_effects.remove(STATUS_CRIMSON_STRIKE_READY);
 
     let smn = &combat_state.summoner;
+    let self_source = owner_actor_id;
     if smn.further_ruin > 0 {
         let remaining = smn
             .further_ruin_expires_at
@@ -2475,15 +2478,14 @@ fn refresh_summoner_statuses(actor: &mut NetworkedActor, owner_actor_id: ObjectI
                     .as_secs_f32()
             })
             .unwrap_or(0.0);
-        status_effects.add(STATUS_FURTHER_RUIN, 0, remaining);
+        status_effects.add_with_source(STATUS_FURTHER_RUIN, 0, remaining, self_source);
     }
     if let Some(expires_at) = smn.searing_light_expires_at {
         let remaining = expires_at
             .saturating_duration_since(Instant::now())
             .as_secs_f32();
-        status_effects.add(STATUS_SEARING_LIGHT, 0, remaining);
+        status_effects.add_with_source(STATUS_SEARING_LIGHT, 0, remaining, self_source);
     }
-    let self_source = owner_actor_id;
 
     if smn.searing_flash_ready {
         let remaining = smn
@@ -2974,5 +2976,26 @@ mod tests {
         let flags_70 = aether_flags_byte(data_70);
         assert_ne!(flags_70 & SUMMONER_GAUGE_FLAG_IFRIT_READY, 0);
         assert!(summon_timer_word(data_70) > 0);
+    }
+
+    /// Mountain Buster Ready outlives the attunement timer on retail: a proc earned from a Topaz
+    /// spell must survive even if the attunement window then lapses on a later tick. The proc's own
+    /// consumption (or a fresh summon) clears it, not attunement expiry.
+    #[test]
+    fn mountain_buster_ready_survives_attunement_timer_expiry() {
+        let mut smn = SummonerState::default();
+        smn.attunement = SummonerAttunement::Topaz;
+        smn.attunement_stacks = 2;
+        // Attunement timer already lapsed.
+        smn.attunement_expires_at = Some(Instant::now() - Duration::from_secs(1));
+        smn.mountain_buster_ready = true;
+
+        refresh_summoner_runtime_state(&mut smn);
+
+        // The expired attunement is cleared...
+        assert_eq!(smn.attunement, SummonerAttunement::None);
+        assert_eq!(smn.attunement_expires_at, None);
+        // ...but the earned proc persists.
+        assert!(smn.mountain_buster_ready);
     }
 }
