@@ -21,7 +21,9 @@ use crate::{
             SummonerState,
         },
         instance::{Instance, QueuedTaskData},
-        jobs::dispatch::{Job, JobActionUpdate, JobActors, JobRefreshResult},
+        jobs::dispatch::{
+            Job, JobActionUpdate, JobActors, JobRefreshResult, send_job_gauge_update,
+        },
         network::{DestinationNetwork, NetworkState},
         set_character_mode,
     },
@@ -271,20 +273,6 @@ struct DemiAutoAttackPlan {
     target_id: ObjectId,
     action_id: u32,
     potency: u32,
-}
-
-fn send_job_gauge_update(
-    network: &mut NetworkState,
-    from_actor_id: ObjectId,
-    classjob_id: u8,
-    data: u64,
-) {
-    let ipc = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorGauge { classjob_id, data });
-    network.send_to_by_actor_id(
-        from_actor_id,
-        FromServer::PacketSegment(ipc, from_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
 }
 
 fn send_summoner_pet_parameters(network: &mut NetworkState, owner_actor_id: ObjectId, pet_id: u32) {
