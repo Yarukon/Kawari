@@ -1467,16 +1467,9 @@ pub fn execute_action(
                 && let Some(NetworkedActor::Player { combat_state, .. }) =
                     instance.find_actor_mut(from_actor_id)
             {
-                for gauge_action in &effects_builder.gauge_actions {
-                    if summoner::is_summoner(class_job) {
-                        summoner::apply_gauge_action(combat_state, gauge_action);
-                    }
-                    if bard::is_bard(class_job) {
-                        bard::apply_bard_gauge_action(
-                            combat_state,
-                            gauge_action.index,
-                            gauge_action.amount,
-                        );
+                if let Some(job) = job_for(class_job) {
+                    for gauge_action in &effects_builder.gauge_actions {
+                        job.apply_gauge_action(combat_state, gauge_action);
                     }
                 }
             }
