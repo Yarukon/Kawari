@@ -19,7 +19,7 @@ use crate::{
         combat_state::PlayerCombatState,
         effect::{gain_effect, send_effects_list},
         instance::{Instance, QueuedTaskData},
-        jobs::{bard, summoner},
+        jobs::{bard, dispatch::job_for, summoner},
         network::{DestinationNetwork, NetworkState},
         set_character_mode, set_shared_group_timeline_state,
     },
@@ -716,31 +716,18 @@ fn resolve_player_action_id(
     let class_job = actor.get_common_spawn().class_job;
     let level = actor.get_common_spawn().level;
     let resolved_action_id = if request.action_type == ActionType::Action
-        && summoner::is_summoner(class_job)
+        && let Some(job) = job_for(class_job)
     {
-        let resolved = summoner::resolve_summoner_action(request, combat_state, level, game_data);
-        if !summoner::can_execute_summoner_action(resolved, combat_state, level) {
+        let resolved = job.resolve_action(request, combat_state, level, game_data);
+        if !job.can_execute(resolved, combat_state, level) {
             tracing::warn!(
                 ?actor_id,
                 action_id = request.action_id,
                 resolved_action_id = resolved,
                 level,
-                state = ?combat_state.summoner,
-                "Rejected Summoner action because the current job state does not allow it",
-            );
-            return None;
-        }
-        resolved
-    } else if request.action_type == ActionType::Action && bard::is_bard(class_job) {
-        let resolved = bard::resolve_bard_action(request, combat_state, level, game_data);
-        if !bard::can_execute_bard_action(resolved, combat_state, level) {
-            tracing::warn!(
-                ?actor_id,
-                action_id = request.action_id,
-                resolved_action_id = resolved,
-                level,
-                state = ?combat_state.bard,
-                "Rejected Bard action because the current job state does not allow it",
+                summoner_state = ?combat_state.summoner,
+                bard_state = ?combat_state.bard,
+                "Rejected job action because the current job state does not allow it",
             );
             return None;
         }
