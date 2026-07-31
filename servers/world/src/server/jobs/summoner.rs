@@ -2484,7 +2484,10 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
     // is conveyed to the client by the pet actor (SetupPet), so this byte is 0 during normal
     // play and only names the return pet (currently always the base carbuncle, 23) while a
     // demi/primal holds it. `summon_expires_at` being Some is exactly "a summon is active".
-    let return_summon: u8 = if summon_expires_at.is_some() {
+    // Masked below 70 alongside the SummonTimer: a sub-70 primal summon (Summon Ifrit/Titan/
+    // Garuda) is castable but its timer is not sent, so the return pet must not be either — else
+    // the gauge would advertise SummonTimer 0 with ReturnSummon 23 (self-inconsistent).
+    let return_summon: u8 = if summon_expires_at.is_some() && level >= LEVEL_SUMMON_BAHAMUT {
         SUMMONER_GAUGE_CARBUNCLE
     } else {
         0
@@ -3228,6 +3231,12 @@ mod tests {
             Some(Instant::now() + Duration::from_secs(15));
         let data = build_summoner_gauge_data(&combat_state, 100);
         assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
+
+        // Below 70 the SummonTimer is masked, so ReturnSummon must be masked too: a sub-70 primal
+        // summon must not advertise a return pet with a zeroed timer.
+        let data = build_summoner_gauge_data(&combat_state, 60);
+        assert_eq!(summon_timer_word(data), 0);
+        assert_eq!(return_summon_byte(data), 0);
     }
 
     /// Zoning mid-demi drops the demi and re-instates a fresh carbuncle: the gauge state must be
