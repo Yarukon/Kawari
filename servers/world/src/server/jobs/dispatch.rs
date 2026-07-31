@@ -15,7 +15,7 @@ use crate::FromServer;
 use crate::gamedata::GameData;
 use crate::lua::GaugeAction;
 use crate::server::actor::NetworkedActor;
-use crate::server::combat_state::PlayerCombatState;
+use crate::server::combat_state::{CarriedPet, PlayerCombatState};
 use crate::server::instance::Instance;
 use crate::server::jobs::bard::Bard;
 use crate::server::jobs::summoner::Summoner;
@@ -171,6 +171,26 @@ pub(in crate::server) trait JobActors: Sync {
 
     /// S8 (generic carbuncle path): spawn the summon-pet after the result packet.
     fn apply_summon_pet_effect(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+    );
+
+    /// Zone-in: re-instate a pet carried across the transition with its SAME object id, so no
+    /// re-summon / birth animation plays (see `reinstate_carried_pet`). Delegated only by Summoner.
+    fn reinstate_carried_pet(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+        carried: CarriedPet,
+    );
+
+    /// Zone-in after a demi/primal was dropped (not carried): reset the gauge state and fade a FRESH
+    /// carbuncle in via cat267, instead of the cat36 birth reveal `apply_summon_pet_effect` plays.
+    /// Matches retail's mid-demi zone transition (see `spawn_carbuncle_with_fade_in`). Summoner only.
+    fn reinstate_carbuncle_after_demi_zone(
         &self,
         network: Arc<Mutex<NetworkState>>,
         instance: &mut Instance,

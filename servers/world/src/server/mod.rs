@@ -1848,6 +1848,17 @@ pub async fn server_main_loop(
                                     );
                                 }
                             }
+                            QueuedTaskData::PetZoneFadeIn { actor_id } => {
+                                let mut data = data.lock();
+                                if let Some(instance) = data.find_actor_instance_mut(*actor_id) {
+                                    let mut network = network.lock();
+                                    summoner::send_carried_pet_fade_in(
+                                        &mut network,
+                                        instance,
+                                        *actor_id,
+                                    );
+                                }
+                            }
                             QueuedTaskData::SummonerPrimalFinisher {
                                 owner_id,
                                 pet_id,

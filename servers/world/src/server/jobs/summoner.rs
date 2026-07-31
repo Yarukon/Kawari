@@ -17,8 +17,8 @@ use crate::{
     server::{
         actor::{NetworkedActor, NpcState},
         combat_state::{
-            PlayerCombatState, SummonerAttunement, SummonerDemiPhase, SummonerNextDemi,
-            SummonerState,
+            CarriedPet, PlayerCombatState, SummonerAttunement, SummonerDemiPhase,
+            SummonerNextDemi, SummonerState,
         },
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{
@@ -34,10 +34,10 @@ use kawari::{
         ObjectTypeKind, Position,
     },
     ipc::zone::{
-        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, BattleNpcSubKind,
-        CharacterDataFlag, DamageElement, DamageType, DisplayFlag, ObjectKind, ServerZoneIpcData,
-        ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect, StatusEffectList, TargetEffect,
-        TargetEffectKind,
+        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, ActorSetPos,
+        BattleNpcSubKind, CharacterDataFlag, DamageElement, DamageType, DisplayFlag, ObjectKind,
+        ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect,
+        StatusEffectList, TargetEffect, TargetEffectKind, WarpType,
     },
 };
 
@@ -542,6 +542,73 @@ pub(crate) fn send_retail_pet_reveal_controls(
             .display_flags
             .remove(DisplayFlag::INVISIBLE);
     }
+}
+
+/// Fade in a re-instated carried pet: cat267 (ActorFadeIn) + cat54 (Targetable 1) + an ActorSetPos
+/// snapping it beside the owner. Deferred (via `QueuedTaskData::PetZoneFadeIn`) until after clients
+/// have spawned the pet, mirroring how `RevealPet` defers the fresh-summon reveal — sending these
+/// in-range packets immediately would drop them, since `send_in_range_implementation` skips clients
+/// that haven't spawned the just-inserted pet yet. Unlike `send_retail_pet_reveal_controls`, this
+/// does NOT play the cat36 birth reveal; the carried pet fades in.
+pub(crate) fn send_carried_pet_fade_in(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    pet_actor_id: ObjectId,
+) {
+    let Some(actor) = instance.find_actor(pet_actor_id) else {
+        return;
+    };
+    let pet_position = actor.position();
+    let pet_rotation = actor.rotation();
+
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 267,
+                param1: 0,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 54,
+                param1: 1,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+
+    // Snap the pet to its position beside the owner (retail sends an ActorSetPos on the pet post-
+    // ZoneIn), so observers already present see it at the right spot.
+    let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(ActorSetPos {
+        position: pet_position,
+        rotation: pet_rotation,
+        warp_type: WarpType::Normal,
+        warp_type_arg: 2,
+        ..Default::default()
+    }));
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::PacketSegment(segment, pet_actor_id),
+        DestinationNetwork::ZoneClients,
+    );
 }
 
 pub(crate) fn sync_pet_for_mount(
@@ -1692,10 +1759,41 @@ pub(crate) fn process_slipstream_lingering_tick(
     hit_targets
 }
 
+/// How a freshly-spawned carbuncle should reveal itself to observers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CarbuncleReveal {
+    /// Fresh summon: spawn INVISIBLE and play the cat36 birth reveal (see `RevealPet`).
+    Birth,
+    /// Zone-in after a demi/primal was dropped: spawn visible and fade in via cat267 (see
+    /// `PetZoneFadeIn`), matching retail's mid-demi zone transition (no birth animation).
+    ZoneFadeIn,
+}
+
 pub(crate) fn apply_summon_pet_effect(
     network: Arc<Mutex<NetworkState>>,
     instance: &mut Instance,
     from_actor_id: ObjectId,
+) {
+    spawn_fresh_carbuncle(network, instance, from_actor_id, CarbuncleReveal::Birth);
+}
+
+/// Spawn a FRESH carbuncle (new actor id) that fades in via cat267 instead of playing the cat36
+/// birth reveal. Used when a demi/primal is dropped by a zone transition: retail spawns a brand-new
+/// carbuncle at the destination with a fade-in, not a birth cue (demi换区 capture). Mirrors
+/// `apply_summon_pet_effect` exactly except for the reveal mode.
+pub(crate) fn spawn_carbuncle_with_fade_in(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+) {
+    spawn_fresh_carbuncle(network, instance, from_actor_id, CarbuncleReveal::ZoneFadeIn);
+}
+
+fn spawn_fresh_carbuncle(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+    reveal: CarbuncleReveal,
 ) {
     if let Some(NetworkedActor::Player { combat_state, .. }) =
         instance.find_actor_mut(from_actor_id)
@@ -1793,7 +1891,11 @@ pub(crate) fn apply_summon_pet_effect(
     spawn.common.level = level;
     spawn.common.position = pet_position;
     spawn.common.rotation = pet_rotation;
-    spawn.common.display_flags = DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1;
+    // Birth reveal spawns INVISIBLE (the cat36 reveal pops it in); a zone fade-in arrives visible.
+    spawn.common.display_flags = match reveal {
+        CarbuncleReveal::Birth => DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1,
+        CarbuncleReveal::ZoneFadeIn => DisplayFlag::UNK2 | DisplayFlag::UNK1,
+    };
     spawn.common.layout_id = 0;
     spawn.common.handler_id = Default::default();
     spawn.common.target_id = Default::default();
@@ -1805,11 +1907,131 @@ pub(crate) fn apply_summon_pet_effect(
     instance.insert_npc(pet_actor_id, spawn);
 
     if let Some(from_id) = network.lock().find_by_actor(from_actor_id) {
+        let data = match reveal {
+            CarbuncleReveal::Birth => QueuedTaskData::RevealPet {
+                actor_id: pet_actor_id,
+            },
+            CarbuncleReveal::ZoneFadeIn => QueuedTaskData::PetZoneFadeIn {
+                actor_id: pet_actor_id,
+            },
+        };
+        instance.insert_task(from_id, from_actor_id, PET_REVEAL_DELAY, data);
+    }
+}
+
+/// Builds the destination spawn for a carried pet: takes the captured `spawn`, relocates it beside
+/// the owner's NEW position/rotation (same math as `apply_summon_pet_effect`), and clears the
+/// INVISIBLE flag so it arrives visible (a fade-in, not a birth animation). All identity/state
+/// (model, pet_id, owner_id, hp/mp, level, name, base_id) is preserved from the capture. Pure/
+/// disk-free so it can be unit-tested without `insert_npc`'s timeline load.
+fn reinstated_pet_spawn(mut spawn: SpawnNpc, owner_position: Position, owner_rotation: f32) -> SpawnNpc {
+    let mut pet_position = owner_position;
+    pet_position.0.x += owner_rotation.sin() * SUMMONER_PET_SPAWN_DISTANCE;
+    pet_position.0.z += owner_rotation.cos() * SUMMONER_PET_SPAWN_DISTANCE;
+    let pet_rotation = rotate_towards(pet_position.0, owner_position.0, owner_rotation);
+
+    spawn.common.position = pet_position;
+    spawn.common.rotation = pet_rotation;
+    // Strip INVISIBLE: the pet arrives visible and is faded in (cat267), never reveal-popped.
+    spawn.common.display_flags.remove(DisplayFlag::INVISIBLE);
+    spawn
+}
+
+/// Re-instate a pet carried across a zone transition (see [`CarriedPet`]) with the SAME object id it
+/// had at the source, so no re-summon / birth animation plays. Mirrors the destination unpark +
+/// fade-in sequence retail sends on the pet (`SetPetEntityId`→0 + cat267 ActorFadeIn + Targetable(1)
+/// + mount_state→0) rather than the fresh-summon spawn+reveal path. Does NOT schedule `RevealPet`.
+pub(crate) fn reinstate_carried_pet(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+    carried: CarriedPet,
+) {
+    // Collision guard: if an actor already holds this id (should never happen), fall back to a
+    // fresh summon rather than clobbering it.
+    if instance.actors.contains_key(&carried.actor_id) {
+        apply_summon_pet_effect(network, instance, from_actor_id);
+        return;
+    }
+
+    if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(from_actor_id)
+    {
+        combat_state.summoner.carbuncle_summoned = true;
+    }
+
+    let Some(owner) = instance.find_actor(from_actor_id) else {
+        return;
+    };
+    let level = owner.get_common_spawn().level;
+    let owner_position = owner.position();
+    let owner_rotation = owner.rotation();
+
+    let pet_actor_id = carried.actor_id;
+    let spawn = reinstated_pet_spawn(carried.spawn, owner_position, owner_rotation);
+    let pet_id = spawn.common.pet_id;
+    let pet_hp = spawn.common.max_health_points;
+    let pet_mp = spawn.common.max_resource_points;
+
+    {
+        let mut network = network.lock();
+        // Re-bind the pet bar to the carried actor id (mirror the fresh-summon SetupPet path, but
+        // reusing the existing object id instead of allocating a new one).
+        send_summoner_pet_parameters(&mut network, from_actor_id, pet_id);
+        network.send_to_by_actor_id(
+            from_actor_id,
+            FromServer::ActorControlSelf(ActorControlCategory::SetupPet {
+                owner_id: from_actor_id,
+                pet_id,
+                pet_actor_id,
+                unk2: 1,
+                unk3: 1,
+            }),
+            DestinationNetwork::ZoneClients,
+        );
+        send_summoner_pet_parameters(&mut network, from_actor_id, pet_id);
+        send_initial_pet_status_list(
+            &mut network,
+            from_actor_id,
+            pet_actor_id,
+            level,
+            pet_hp,
+            pet_hp,
+            pet_mp,
+            pet_mp,
+        );
+    }
+
+    // Insert under the SAME id (the pet actor never carries meaningful statuses — all SMN runtime
+    // state lives on the owner's SummonerState and the pet's wire status list is always sent empty,
+    // so plain `insert_npc` is sufficient).
+    instance.insert_npc(pet_actor_id, spawn);
+
+    let from_id = {
+        let mut network = network.lock();
+        // Destination unpark: SetPetEntityId→0 (to the owner) + re-send pet parameters. These reach
+        // the owner regardless of pet spawn state, so they stay here.
+        network.send_to_by_actor_id(
+            from_actor_id,
+            FromServer::ActorControlSelf(ActorControlCategory::SetPetEntityId { unk1: 0 }),
+            DestinationNetwork::ZoneClients,
+        );
+
+        let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
+        send_summoner_pet_parameters_with_flags(&mut network, from_actor_id, pet_id, unk3, unk4);
+
+        network.find_by_actor(from_actor_id)
+    };
+
+    // Defer the fade-in (cat267 ActorFadeIn + cat54 Targetable(1) + ActorSetPos): these are in-range
+    // sends targeting the just-inserted pet, which `send_in_range_implementation` drops for clients
+    // that haven't spawned it yet. Schedule them AFTER the client walks the pet in, mirroring how the
+    // fresh-summon path defers its reveal via `RevealPet` with `PET_REVEAL_DELAY`.
+    if let Some(from_id) = from_id {
         instance.insert_task(
             from_id,
             from_actor_id,
             PET_REVEAL_DELAY,
-            QueuedTaskData::RevealPet {
+            QueuedTaskData::PetZoneFadeIn {
                 actor_id: pet_actor_id,
             },
         );
@@ -2014,6 +2236,35 @@ fn clear_demi_state(smn: &mut SummonerState) {
     smn.demi_enkindle_ready = false;
     smn.demi_finisher_ready = false;
     smn.demi_auto_attack_count = 0;
+}
+
+/// Reset the gauge-bearing SummonerState when a demi/primal is dropped by a zone transition and a
+/// fresh carbuncle is faded in at the destination. Retail (demi换区 capture, user-confirmed) leaves
+/// the SMN in the Solar Bahamut primed default state (烈日龙神预备阶段) with no three-primal ready
+/// bits: SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow cleared, and AetherFlags 0x08
+/// (SOLAR_BAHAMUT_FIRST_PRIMED). Rather than hand-pack the gauge, clear the underlying state and let
+/// `build_summoner_gauge_data` re-derive it.
+///
+/// `next_demi` is FORCED back to `SolarBahamutFirst`: during any active demi it has already been
+/// advanced past `SolarBahamutFirst` by `advance_summoner_next_demi_after_summon` (the only reachable
+/// mid-demi values are `Bahamut` during a Solar demi or `SolarBahamutSecond` during a Bahamut demi),
+/// so preserving it would yield AetherFlags 0x00 or 0x0C — never the 0x08 retail shows. Forcing the
+/// default primed state resets the burst cycle so the client resumes the Solar Bahamut oGCD rotation.
+pub(crate) fn reset_summoner_state_for_demi_zone(smn: &mut SummonerState) {
+    clear_demi_state(smn);
+    clear_primal_summon_timer(smn);
+    // Clear attunement too: `was_mid_demi` also fires for a primal-only zone (Summon Ifrit sets
+    // Ruby attunement + stacks + expiry), which retail clears — start_demi_phase already clears it
+    // for the demi case, so this covers the primal-only path.
+    clear_attunement(smn);
+    smn.ruby_arcanum = false;
+    smn.topaz_arcanum = false;
+    smn.emerald_arcanum = false;
+    smn.aetherflow_stacks = 0;
+    // Reset the burst cycle to the default primed state (烈日龙神预备阶段) → AetherFlags 0x08.
+    smn.next_demi = SummonerNextDemi::SolarBahamutFirst;
+    // A fresh carbuncle is out at the destination.
+    smn.carbuncle_summoned = true;
 }
 
 fn refresh_summoner_runtime_state(smn: &mut SummonerState) {
@@ -2232,7 +2483,15 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
         summon_timer = 0;
     }
 
-    let carbuncle: u8 = if smn.carbuncle_summoned {
+    // ReturnSummon (byte 4) is the pet to RESTORE when the active demi/primal ends, per
+    // FFXIVClientStructs `SummonerGauge` — NOT a "carbuncle present" flag. The live carbuncle
+    // is conveyed to the client by the pet actor (SetupPet), so this byte is 0 during normal
+    // play and only names the return pet (currently always the base carbuncle, 23) while a
+    // demi/primal holds it. `summon_expires_at` being Some is exactly "a summon is active".
+    // Masked below 70 alongside the SummonTimer: a sub-70 primal summon (Summon Ifrit/Titan/
+    // Garuda) is castable but its timer is not sent, so the return pet must not be either — else
+    // the gauge would advertise SummonTimer 0 with ReturnSummon 23 (self-inconsistent).
+    let return_summon: u8 = if summon_expires_at.is_some() && level >= LEVEL_SUMMON_BAHAMUT {
         SUMMONER_GAUGE_CARBUNCLE
     } else {
         0
@@ -2243,7 +2502,7 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
     //   5 ReturnSummonGlam | 6 Attunement | 7 AetherFlags
     (summon_timer as u64)
         | ((attunement_timer as u64) << 16)
-        | ((carbuncle as u64) << 32)
+        | ((return_summon as u64) << 32)
         | ((attunement as u64) << 48)
         | ((aether_flags as u64) << 56)
 }
@@ -2892,6 +3151,25 @@ impl JobActors for Summoner {
         apply_summon_pet_effect(network, instance, owner);
     }
 
+    fn reinstate_carried_pet(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+        carried: CarriedPet,
+    ) {
+        reinstate_carried_pet(network, instance, owner, carried);
+    }
+
+    fn reinstate_carbuncle_after_demi_zone(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+    ) {
+        spawn_carbuncle_with_fade_in(network, instance, owner);
+    }
+
     fn on_demi_expired(
         &self,
         network: &mut NetworkState,
@@ -2926,6 +3204,103 @@ mod tests {
 
     fn summon_timer_word(data: u64) -> u16 {
         data as u16
+    }
+
+    fn return_summon_byte(data: u64) -> u8 {
+        (data >> 32) as u8
+    }
+
+    fn attunement_byte(data: u64) -> u8 {
+        (data >> 48) as u8
+    }
+
+    /// `ReturnSummon` (byte 4) is the pet to RESTORE when a demi/primal ends, not a
+    /// "carbuncle is present" flag. It must be the base pet (23) only while a demi/primal
+    /// holds the carbuncle for return, and 0 otherwise — the live carbuncle is conveyed by
+    /// the pet actor, not this byte. Confirmed against FFXIVClientStructs `SummonerGauge`.
+    #[test]
+    fn gauge_return_summon_only_during_demi() {
+        // Carbuncle out, no demi/primal → byte 4 is 0.
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner.carbuncle_summoned = true;
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), 0);
+
+        // Mid-demi with the carbuncle held for return → byte 4 is the base pet (23).
+        combat_state.summoner.demi_phase = SummonerDemiPhase::SolarBahamut;
+        combat_state.summoner.demi_expires_at = Some(Instant::now() + Duration::from_secs(15));
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
+
+        // Same during an active primal summon.
+        combat_state.summoner.demi_phase = SummonerDemiPhase::None;
+        combat_state.summoner.demi_expires_at = None;
+        combat_state.summoner.primal_summon_expires_at =
+            Some(Instant::now() + Duration::from_secs(15));
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
+
+        // Below 70 the SummonTimer is masked, so ReturnSummon must be masked too: a sub-70 primal
+        // summon must not advertise a return pet with a zeroed timer.
+        let data = build_summoner_gauge_data(&combat_state, 60);
+        assert_eq!(summon_timer_word(data), 0);
+        assert_eq!(return_summon_byte(data), 0);
+    }
+
+    /// Zoning mid-demi drops the demi and re-instates a fresh carbuncle: the gauge state must be
+    /// reset to match retail (demi换区 capture, user-confirmed) — the SMN returns to the Solar Bahamut
+    /// primed default (SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow cleared, AetherFlags 0x08).
+    /// The pre-zone state here is the REACHABLE mid-Solar-demi one: `next_demi` has already been
+    /// advanced to `Bahamut`, so the reset must FORCE it back to `SolarBahamutFirst` (it is never
+    /// `SolarBahamutFirst` while a demi is running). The reset clears the state and lets
+    /// `build_summoner_gauge_data` re-derive the gauge bytes.
+    #[test]
+    fn demi_zone_reset_primes_solar_bahamut_and_clears_the_rest() {
+        let mut smn = SummonerState::default();
+        smn.demi_phase = SummonerDemiPhase::SolarBahamut;
+        smn.demi_expires_at = Some(Instant::now() + Duration::from_secs(15));
+        // Mid-Solar-demi `next_demi` is `Bahamut` (advanced past SolarBahamutFirst on summon).
+        smn.next_demi = SummonerNextDemi::Bahamut;
+        smn.ruby_arcanum = true;
+        smn.topaz_arcanum = true;
+        smn.emerald_arcanum = true;
+        smn.aetherflow_stacks = 2;
+        // Attunement (as a primal-only zone would carry: Ruby + stacks + expiry) must be cleared too.
+        smn.attunement = SummonerAttunement::Ruby;
+        smn.attunement_stacks = 2;
+        smn.attunement_expires_at = Some(Instant::now() + Duration::from_secs(30));
+        smn.primal_summon_expires_at = Some(Instant::now() + Duration::from_secs(15));
+
+        reset_summoner_state_for_demi_zone(&mut smn);
+
+        assert_eq!(smn.demi_phase, SummonerDemiPhase::None);
+        assert_eq!(smn.demi_expires_at, None);
+        assert_eq!(smn.primal_summon_expires_at, None);
+        assert!(!smn.ruby_arcanum);
+        assert!(!smn.topaz_arcanum);
+        assert!(!smn.emerald_arcanum);
+        assert_eq!(smn.aetherflow_stacks, 0);
+        assert_eq!(smn.attunement, SummonerAttunement::None);
+        assert_eq!(smn.attunement_stacks, 0);
+        assert_eq!(smn.attunement_expires_at, None);
+        assert!(smn.carbuncle_summoned);
+        // The burst cycle is reset to the Solar Bahamut primed default, regardless of the mid-demi
+        // `next_demi` value.
+        assert_eq!(smn.next_demi, SummonerNextDemi::SolarBahamutFirst);
+
+        // The rebuilt gauge matches the retail post-zone bytes: AetherFlags 0x08 (SolarBahamut first
+        // only), SummonTimer 0, ReturnSummon 0.
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner = smn;
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(
+            aether_flags_byte(data),
+            SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_FIRST_PRIMED
+        );
+        assert_eq!(summon_timer_word(data), 0);
+        assert_eq!(return_summon_byte(data), 0);
+        // Attunement (byte 6) is cleared by the reset (covers the primal-only zone case).
+        assert_eq!(attunement_byte(data), 0);
     }
 
     /// Trait 619: Solar primed bits must not leave the server under level sync.
@@ -3089,5 +3464,41 @@ mod tests {
         } else {
             panic!("owner should still be a Player actor");
         }
+    }
+
+    /// A carried pet re-instated at the destination arrives VISIBLE (INVISIBLE stripped) and keeps
+    /// all its identity/state — the fresh-summon INVISIBLE+reveal (birth animation) path is avoided.
+    #[test]
+    fn reinstated_pet_spawn_arrives_visible_and_preserves_identity() {
+        let mut spawn = SpawnNpc::default();
+        spawn.common.base_id = 42;
+        spawn.common.name_id = 7;
+        spawn.common.pet_id = SUMMONER_PET_HOTBAR_CARBUNCLE;
+        spawn.common.owner_id = ObjectId(1);
+        spawn.common.model_chara = 411;
+        spawn.common.level = 90;
+        spawn.common.max_health_points = 12345;
+        spawn.common.health_points = 12345;
+        // As captured at the source: fresh summons are spawned INVISIBLE then revealed; a carried
+        // pet must NOT keep that flag.
+        spawn.common.display_flags = DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1;
+
+        let owner_position = Position(Vec3::new(100.0, 0.0, 200.0));
+        let owner_rotation = 0.0_f32;
+        let out = reinstated_pet_spawn(spawn, owner_position, owner_rotation);
+
+        // Arrives visible: no birth-animation reveal, just a fade-in.
+        assert!(!out.common.display_flags.contains(DisplayFlag::INVISIBLE));
+        // Identity/state preserved from the capture.
+        assert_eq!(out.common.base_id, 42);
+        assert_eq!(out.common.name_id, 7);
+        assert_eq!(out.common.pet_id, SUMMONER_PET_HOTBAR_CARBUNCLE);
+        assert_eq!(out.common.owner_id, ObjectId(1));
+        assert_eq!(out.common.model_chara, 411);
+        assert_eq!(out.common.level, 90);
+        assert_eq!(out.common.max_health_points, 12345);
+        // Repositioned beside the owner's NEW position (rotation 0 => +z by the spawn distance).
+        assert!((out.common.position.0.z - (200.0 + SUMMONER_PET_SPAWN_DISTANCE)).abs() < 1e-3);
+        assert!((out.common.position.0.x - 100.0).abs() < 1e-3);
     }
 }

@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use kawari::{common::ObjectId, ipc::zone::SpawnNpc};
+
 use super::jobs::bard::BardState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -30,7 +32,14 @@ pub enum SummonerNextDemi {
     SolarBahamutSecond,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+/// Snapshot of a summoner pet captured at the source instance for cross-zone re-instatement.
+#[derive(Debug, Clone)]
+pub struct CarriedPet {
+    pub actor_id: ObjectId,
+    pub spawn: SpawnNpc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SummonerState {
     pub carbuncle_summoned: bool,
     pub attunement: SummonerAttunement,
@@ -66,6 +75,46 @@ pub struct SummonerState {
     pub searing_flash_expires_at: Option<Instant>,
     #[serde(skip)]
     pub lux_solaris_expires_at: Option<Instant>,
+    /// A pet actor carried across a zone transition so it can be re-instated with the SAME object
+    /// id (no re-summon / birth animation). None when no pet is out or after re-instatement.
+    #[serde(skip)]
+    pub carried_pet: Option<CarriedPet>,
+}
+
+// Hand-written to skip the transient `carried_pet` (its `SpawnNpc` is not `PartialEq`), mirroring
+// `QueuedTask`'s impl that skips its non-comparable `data`. `carried_pet` is `#[serde(skip)]` carry
+// state, never part of a summoner's persisted equality.
+impl PartialEq for SummonerState {
+    // NOTE: when adding a field to SummonerState, add it here too (except transient #[serde(skip)]
+    // carry state like carried_pet). This impl is hand-written to skip non-PartialEq carry state.
+    fn eq(&self, other: &Self) -> bool {
+        self.carbuncle_summoned == other.carbuncle_summoned
+            && self.attunement == other.attunement
+            && self.attunement_stacks == other.attunement_stacks
+            && self.aetherflow_stacks == other.aetherflow_stacks
+            && self.ruby_arcanum == other.ruby_arcanum
+            && self.topaz_arcanum == other.topaz_arcanum
+            && self.emerald_arcanum == other.emerald_arcanum
+            && self.further_ruin == other.further_ruin
+            && self.further_ruin_expires_at == other.further_ruin_expires_at
+            && self.mountain_buster_ready == other.mountain_buster_ready
+            && self.slipstream_ready == other.slipstream_ready
+            && self.crimson_cyclone_ready == other.crimson_cyclone_ready
+            && self.crimson_strike_ready == other.crimson_strike_ready
+            && self.demi_phase == other.demi_phase
+            && self.next_demi == other.next_demi
+            && self.demi_enkindle_ready == other.demi_enkindle_ready
+            && self.demi_finisher_ready == other.demi_finisher_ready
+            && self.demi_auto_attack_count == other.demi_auto_attack_count
+            && self.searing_light_expires_at == other.searing_light_expires_at
+            && self.searing_flash_ready == other.searing_flash_ready
+            && self.lux_solaris_ready == other.lux_solaris_ready
+            && self.attunement_expires_at == other.attunement_expires_at
+            && self.demi_expires_at == other.demi_expires_at
+            && self.primal_summon_expires_at == other.primal_summon_expires_at
+            && self.searing_flash_expires_at == other.searing_flash_expires_at
+            && self.lux_solaris_expires_at == other.lux_solaris_expires_at
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -270,5 +319,16 @@ impl PlayerCombatState {
             .as_mut()
             .map(CooldownState::timer_values)
             .unwrap_or((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh summoner has no pet carried across a zone transition.
+    #[test]
+    fn default_summoner_has_no_carried_pet() {
+        assert!(SummonerState::default().carried_pet.is_none());
     }
 }
