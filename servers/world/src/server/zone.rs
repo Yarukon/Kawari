@@ -17,6 +17,7 @@ use crate::{
     lua::LuaZone,
     server::{
         NetworkedActor, WorldServer,
+        actor::NpcState,
         combat_state::{CarriedPet, PlayerCombatState},
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{Job, job_for},
@@ -996,20 +997,31 @@ pub fn take_combat_state_and_despawn_pets(
     // the destination (no re-summon / birth animation — see `reinstate_carried_pet`). Position is
     // not carried; it is recomputed beside the owner's new position at the destination.
     if let Some(state) = carried_combat_state.as_mut() {
-        for (id, actor) in &current_instance.actors {
-            if let NetworkedActor::Npc {
-                spawn,
-                status_effects,
-                ..
-            } = actor
-                && spawn.common.owner_id == actor_id
-            {
-                state.summoner.carried_pet = Some(CarriedPet {
-                    actor_id: *id,
-                    spawn: spawn.clone(),
-                    status_effects: status_effects.clone(),
-                });
-                break;
+        // INTERIM: don't carry a demi/primal actor across a zone (it would arrive with no volley
+        // tasks). Pending a retail-behavior check on mid-demi zoning; revisit to either keep this
+        // exclusion or carry+reschedule the demi.
+        let carrying_demi_or_primal = state.summoner.demi_expires_at.is_some()
+            || state.summoner.primal_summon_expires_at.is_some();
+        if !carrying_demi_or_primal {
+            for (id, actor) in &current_instance.actors {
+                if let NetworkedActor::Npc {
+                    state: npc_state,
+                    spawn,
+                    status_effects,
+                    ..
+                } = actor
+                    && spawn.common.owner_id == actor_id
+                    // Skip a Dead owned pet: after a summon/demi cast a fading Dead carbuncle can
+                    // coexist with the live pet, and HashMap order could otherwise pick it.
+                    && *npc_state != NpcState::Dead
+                {
+                    state.summoner.carried_pet = Some(CarriedPet {
+                        actor_id: *id,
+                        spawn: spawn.clone(),
+                        status_effects: status_effects.clone(),
+                    });
+                    break;
+                }
             }
         }
     }
@@ -1808,12 +1820,25 @@ mod tests {
     /// Insert an owned live pet directly (bypassing `insert_npc`, which loads a timeline file from
     /// disk that isn't present in the unit-test environment).
     fn insert_owned_pet(instance: &mut Instance, id: ObjectId, owner: ObjectId) {
+        insert_owned_pet_with_state(instance, id, owner, NpcState::Follow);
+    }
+
+    /// Like [`insert_owned_pet`] but with an explicit `NpcState`; used to plant a Dead owned pet.
+    fn insert_owned_pet_with_state(
+        instance: &mut Instance,
+        id: ObjectId,
+        owner: ObjectId,
+        state: NpcState,
+    ) {
         let mut spawn = SpawnNpc::default();
         spawn.common.owner_id = owner;
+        if state == NpcState::Dead {
+            spawn.common.health_points = 0;
+        }
         instance.actors.insert(
             id,
             NetworkedActor::Npc {
-                state: NpcState::natural_state_of(&spawn),
+                state,
                 navmesh_path: VecDeque::default(),
                 navmesh_path_lerp: 0.0,
                 navmesh_target: None,
@@ -1868,6 +1893,44 @@ mod tests {
         let mut network = NetworkState::default();
 
         instance.insert_empty_actor(owner);
+
+        let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
+            .expect("player exists so combat state is returned");
+        assert!(carried.summoner.carried_pet.is_none());
+    }
+
+    /// A Dead owned pet (the fading carbuncle after a summon/demi cast) is never carried; with no
+    /// live pet present the carry stays `None`.
+    #[test]
+    fn take_combat_state_does_not_carry_a_dead_pet() {
+        let owner = ObjectId(1);
+        let dead_pet = ObjectId(2);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+
+        instance.insert_empty_actor(owner);
+        insert_owned_pet_with_state(&mut instance, dead_pet, owner, NpcState::Dead);
+
+        let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
+            .expect("player exists so combat state is returned");
+        assert!(carried.summoner.carried_pet.is_none());
+    }
+
+    /// While a demi is active the pet is not carried (INTERIM exclusion): ZoneLoaded falls back to
+    /// the fresh-summon path instead of re-instating a demi actor with no volley tasks.
+    #[test]
+    fn take_combat_state_does_not_carry_while_demi_active() {
+        let owner = ObjectId(1);
+        let pet = ObjectId(2);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+
+        instance.insert_empty_actor(owner);
+        insert_owned_pet(&mut instance, pet, owner);
+        if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(owner) {
+            combat_state.summoner.demi_expires_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        }
 
         let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
             .expect("player exists so combat state is returned");
