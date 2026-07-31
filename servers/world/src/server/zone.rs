@@ -17,7 +17,7 @@ use crate::{
     lua::LuaZone,
     server::{
         NetworkedActor, WorldServer,
-        combat_state::PlayerCombatState,
+        combat_state::{CarriedPet, PlayerCombatState},
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{Job, job_for},
         network::{DestinationNetwork, NetworkState},
@@ -983,7 +983,7 @@ pub fn take_combat_state_and_despawn_pets(
     network: &mut NetworkState,
     actor_id: ObjectId,
 ) -> Option<PlayerCombatState> {
-    let carried_combat_state =
+    let mut carried_combat_state =
         if let Some(NetworkedActor::Player { combat_state, .. }) =
             current_instance.find_actor(actor_id)
         {
@@ -992,8 +992,36 @@ pub fn take_combat_state_and_despawn_pets(
             None
         };
 
+    // Snapshot the first pet this player owns so it can be re-instated with the SAME object id in
+    // the destination (no re-summon / birth animation — see `reinstate_carried_pet`). Position is
+    // not carried; it is recomputed beside the owner's new position at the destination.
+    if let Some(state) = carried_combat_state.as_mut() {
+        for (id, actor) in &current_instance.actors {
+            if let NetworkedActor::Npc {
+                spawn,
+                status_effects,
+                ..
+            } = actor
+                && spawn.common.owner_id == actor_id
+            {
+                state.summoner.carried_pet = Some(CarriedPet {
+                    actor_id: *id,
+                    spawn: spawn.clone(),
+                    status_effects: status_effects.clone(),
+                });
+                break;
+            }
+        }
+    }
+
+    // Fade the pet out + park it at the source (SetPetEntityId + mount_state + cat266 + Targetable(0)),
+    // mirroring the mount park sequence, before it is removed from the old instance. Observers in the
+    // old zone see it fade and vanish; they don't follow to the destination.
+    crate::server::jobs::summoner::sync_pet_for_mount(network, current_instance, actor_id);
+
     // Despawn this player's pet(s) in the old instance so they don't linger orphaned; the pet is
-    // re-summoned in the destination once the player has loaded (see ZoneLoaded).
+    // re-instated (carried id) or re-summoned in the destination once the player has loaded (see
+    // ZoneLoaded).
     let pet_ids: Vec<ObjectId> = current_instance
         .actors
         .iter()
@@ -1752,5 +1780,84 @@ pub fn handle_zone_messages(
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, VecDeque};
+
+    use super::*;
+    use crate::StatusEffects;
+    use crate::server::actor::NpcState;
+    use kawari::common::Timeline;
+
+    /// Insert an owned live pet directly (bypassing `insert_npc`, which loads a timeline file from
+    /// disk that isn't present in the unit-test environment).
+    fn insert_owned_pet(instance: &mut Instance, id: ObjectId, owner: ObjectId) {
+        let mut spawn = SpawnNpc::default();
+        spawn.common.owner_id = owner;
+        instance.actors.insert(
+            id,
+            NetworkedActor::Npc {
+                state: NpcState::natural_state_of(&spawn),
+                navmesh_path: VecDeque::default(),
+                navmesh_path_lerp: 0.0,
+                navmesh_target: None,
+                last_position: None,
+                spawn_position: spawn.common.position.0,
+                spawn,
+                timeline: Timeline {
+                    autoattack_action_id: 0,
+                    timeline_always_plays: false,
+                    timepoints: Vec::new(),
+                    on_death: Vec::new(),
+                },
+                timeline_position: 0,
+                hate_list: HashMap::new(),
+                currently_invulnerable: false,
+                ai_paused: false,
+                targetable: true,
+                visible: true,
+                cast_locked: false,
+                status_effects: StatusEffects::default(),
+            },
+        );
+    }
+
+    /// A player with a pet out: the returned combat state carries the pet snapshot with the pet's
+    /// map id and owning owner id, so the destination can re-instate it with the same object id.
+    #[test]
+    fn take_combat_state_carries_the_owned_pet() {
+        let owner = ObjectId(1);
+        let pet = ObjectId(2);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+
+        instance.insert_empty_actor(owner);
+        insert_owned_pet(&mut instance, pet, owner);
+
+        let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
+            .expect("player exists so combat state is returned");
+        let carried_pet = carried
+            .summoner
+            .carried_pet
+            .expect("an owned pet must be carried");
+        assert_eq!(carried_pet.actor_id, pet);
+        assert_eq!(carried_pet.spawn.common.owner_id, owner);
+    }
+
+    /// A player with no pet out carries nothing.
+    #[test]
+    fn take_combat_state_carries_nothing_without_a_pet() {
+        let owner = ObjectId(1);
+        let mut instance = Instance::default();
+        let mut network = NetworkState::default();
+
+        instance.insert_empty_actor(owner);
+
+        let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
+            .expect("player exists so combat state is returned");
+        assert!(carried.summoner.carried_pet.is_none());
     }
 }
