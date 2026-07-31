@@ -997,9 +997,12 @@ pub fn take_combat_state_and_despawn_pets(
     // the destination (no re-summon / birth animation — see `reinstate_carried_pet`). Position is
     // not carried; it is recomputed beside the owner's new position at the destination.
     if let Some(state) = carried_combat_state.as_mut() {
-        // INTERIM: don't carry a demi/primal actor across a zone (it would arrive with no volley
-        // tasks). Pending a retail-behavior check on mid-demi zoning; revisit to either keep this
-        // exclusion or carry+reschedule the demi.
+        // Don't carry a demi/primal actor across a zone. Retail-confirmed (demi换区.log): a demi
+        // (e.g. Solar Bahamut) is dismissed on zone-out and the destination spawns a FRESH Carbuncle
+        // with the summoner gauge reset — the demi never persists. Leaving `carried_pet` None here
+        // makes ZoneLoaded fall back to the fresh-summon Carbuncle path, matching that revert.
+        // (Follow-up: retail fades the new Carbuncle in via cat267 rather than a cat36 birth reveal,
+        // and clears the gauge demi/Aetherflow/arcanum/attunement state — tracked separately.)
         let carrying_demi_or_primal = state.summoner.demi_expires_at.is_some()
             || state.summoner.primal_summon_expires_at.is_some();
         if !carrying_demi_or_primal {
