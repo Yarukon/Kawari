@@ -799,6 +799,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kawari-constants-gen"
+version = "7.51.2"
+dependencies = [
+ "icarus",
+ "kawari",
+ "physis",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kawari-core-macro"
 version = "7.51.2"
 dependencies = [

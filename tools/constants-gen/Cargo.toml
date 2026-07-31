@@ -1,0 +1,14 @@
+[package]
+name = "kawari-constants-gen"
+edition.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+icarus = { workspace = true }
+kawari = { path = "../../core" }
+physis = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
