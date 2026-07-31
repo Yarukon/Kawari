@@ -165,6 +165,12 @@ pub enum QueuedTaskData {
     RevealPet {
         actor_id: ObjectId,
     },
+    /// Fade in a pet carried across a zone transition, after the client has spawned it. Sends the
+    /// cat267 (ActorFadeIn) + cat54 (Targetable 1) + ActorSetPos that would be dropped if sent
+    /// immediately in `reinstate_carried_pet` (the client hasn't walked the pet in yet).
+    PetZoneFadeIn {
+        actor_id: ObjectId,
+    },
     /// Resolve a short-lived Summoner elemental primal's finisher. If the owner has no attackable
     /// target yet, this task retries within the 8s summon window, then reverts to carbuncle without
     /// damage.

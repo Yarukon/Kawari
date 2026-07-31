@@ -544,6 +544,73 @@ pub(crate) fn send_retail_pet_reveal_controls(
     }
 }
 
+/// Fade in a re-instated carried pet: cat267 (ActorFadeIn) + cat54 (Targetable 1) + an ActorSetPos
+/// snapping it beside the owner. Deferred (via `QueuedTaskData::PetZoneFadeIn`) until after clients
+/// have spawned the pet, mirroring how `RevealPet` defers the fresh-summon reveal — sending these
+/// in-range packets immediately would drop them, since `send_in_range_implementation` skips clients
+/// that haven't spawned the just-inserted pet yet. Unlike `send_retail_pet_reveal_controls`, this
+/// does NOT play the cat36 birth reveal; the carried pet fades in.
+pub(crate) fn send_carried_pet_fade_in(
+    network: &mut NetworkState,
+    instance: &mut Instance,
+    pet_actor_id: ObjectId,
+) {
+    let Some(actor) = instance.find_actor(pet_actor_id) else {
+        return;
+    };
+    let pet_position = actor.position();
+    let pet_rotation = actor.rotation();
+
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 267,
+                param1: 0,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 54,
+                param1: 1,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+
+    // Snap the pet to its position beside the owner (retail sends an ActorSetPos on the pet post-
+    // ZoneIn), so observers already present see it at the right spot.
+    let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(ActorSetPos {
+        position: pet_position,
+        rotation: pet_rotation,
+        warp_type: WarpType::Normal,
+        warp_type_arg: 2,
+        ..Default::default()
+    }));
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::PacketSegment(segment, pet_actor_id),
+        DestinationNetwork::ZoneClients,
+    );
+}
+
 pub(crate) fn sync_pet_for_mount(
     network: &mut NetworkState,
     instance: &mut Instance,
@@ -1866,8 +1933,6 @@ pub(crate) fn reinstate_carried_pet(
     let pet_actor_id = carried.actor_id;
     let spawn = reinstated_pet_spawn(carried.spawn, owner_position, owner_rotation);
     let pet_id = spawn.common.pet_id;
-    let pet_position = spawn.common.position;
-    let pet_rotation = spawn.common.rotation;
     let pet_hp = spawn.common.max_health_points;
     let pet_mp = spawn.common.max_resource_points;
 
@@ -1906,65 +1971,36 @@ pub(crate) fn reinstate_carried_pet(
     let _ = &carried.status_effects;
     instance.insert_npc(pet_actor_id, spawn);
 
-    let mut network = network.lock();
-    // Destination unpark + fade-in: SetPetEntityId→0, cat267 (ActorFadeIn), Targetable(1),
-    // mount_state→0 — the same toggle sequence as `sync_pet_after_dismount`.
-    network.send_to_by_actor_id(
-        from_actor_id,
-        FromServer::ActorControlSelf(ActorControlCategory::SetPetEntityId { unk1: 0 }),
-        DestinationNetwork::ZoneClients,
-    );
-    network.send_in_range_inclusive_instance(
-        pet_actor_id,
-        instance,
-        FromServer::ActorControl(
-            pet_actor_id,
-            ActorControlCategory::Unknown {
-                category: 267,
-                param1: 0,
-                param2: 0,
-                param3: 0,
-                param4: 0,
-                param5: 0,
-            },
-        ),
-        DestinationNetwork::ZoneClients,
-    );
-    network.send_in_range_inclusive_instance(
-        pet_actor_id,
-        instance,
-        FromServer::ActorControl(
-            pet_actor_id,
-            ActorControlCategory::Unknown {
-                category: 54,
-                param1: 1,
-                param2: 0,
-                param3: 0,
-                param4: 0,
-                param5: 0,
-            },
-        ),
-        DestinationNetwork::ZoneClients,
-    );
+    let from_id = {
+        let mut network = network.lock();
+        // Destination unpark: SetPetEntityId→0 (to the owner) + re-send pet parameters. These reach
+        // the owner regardless of pet spawn state, so they stay here.
+        network.send_to_by_actor_id(
+            from_actor_id,
+            FromServer::ActorControlSelf(ActorControlCategory::SetPetEntityId { unk1: 0 }),
+            DestinationNetwork::ZoneClients,
+        );
 
-    let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
-    send_summoner_pet_parameters_with_flags(&mut network, from_actor_id, pet_id, unk3, unk4);
+        let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
+        send_summoner_pet_parameters_with_flags(&mut network, from_actor_id, pet_id, unk3, unk4);
 
-    // Snap the pet to its recomputed position beside the owner at the destination (retail sends an
-    // ActorSetPos on the pet post-ZoneIn), so observers already present see it at the right spot.
-    let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(ActorSetPos {
-        position: pet_position,
-        rotation: pet_rotation,
-        warp_type: WarpType::Normal,
-        warp_type_arg: 2,
-        ..Default::default()
-    }));
-    network.send_in_range_inclusive_instance(
-        pet_actor_id,
-        instance,
-        FromServer::PacketSegment(segment, pet_actor_id),
-        DestinationNetwork::ZoneClients,
-    );
+        network.find_by_actor(from_actor_id)
+    };
+
+    // Defer the fade-in (cat267 ActorFadeIn + cat54 Targetable(1) + ActorSetPos): these are in-range
+    // sends targeting the just-inserted pet, which `send_in_range_implementation` drops for clients
+    // that haven't spawned it yet. Schedule them AFTER the client walks the pet in, mirroring how the
+    // fresh-summon path defers its reveal via `RevealPet` with `PET_REVEAL_DELAY`.
+    if let Some(from_id) = from_id {
+        instance.insert_task(
+            from_id,
+            from_actor_id,
+            PET_REVEAL_DELAY,
+            QueuedTaskData::PetZoneFadeIn {
+                actor_id: pet_actor_id,
+            },
+        );
+    }
 }
 
 pub(crate) fn schedule_demi_auto_attack(instance: &mut Instance, owner_id: ObjectId) {
