@@ -1759,10 +1759,41 @@ pub(crate) fn process_slipstream_lingering_tick(
     hit_targets
 }
 
+/// How a freshly-spawned carbuncle should reveal itself to observers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CarbuncleReveal {
+    /// Fresh summon: spawn INVISIBLE and play the cat36 birth reveal (see `RevealPet`).
+    Birth,
+    /// Zone-in after a demi/primal was dropped: spawn visible and fade in via cat267 (see
+    /// `PetZoneFadeIn`), matching retail's mid-demi zone transition (no birth animation).
+    ZoneFadeIn,
+}
+
 pub(crate) fn apply_summon_pet_effect(
     network: Arc<Mutex<NetworkState>>,
     instance: &mut Instance,
     from_actor_id: ObjectId,
+) {
+    spawn_fresh_carbuncle(network, instance, from_actor_id, CarbuncleReveal::Birth);
+}
+
+/// Spawn a FRESH carbuncle (new actor id) that fades in via cat267 instead of playing the cat36
+/// birth reveal. Used when a demi/primal is dropped by a zone transition: retail spawns a brand-new
+/// carbuncle at the destination with a fade-in, not a birth cue (demi换区 capture). Mirrors
+/// `apply_summon_pet_effect` exactly except for the reveal mode.
+pub(crate) fn spawn_carbuncle_with_fade_in(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+) {
+    spawn_fresh_carbuncle(network, instance, from_actor_id, CarbuncleReveal::ZoneFadeIn);
+}
+
+fn spawn_fresh_carbuncle(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+    reveal: CarbuncleReveal,
 ) {
     if let Some(NetworkedActor::Player { combat_state, .. }) =
         instance.find_actor_mut(from_actor_id)
@@ -1860,7 +1891,11 @@ pub(crate) fn apply_summon_pet_effect(
     spawn.common.level = level;
     spawn.common.position = pet_position;
     spawn.common.rotation = pet_rotation;
-    spawn.common.display_flags = DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1;
+    // Birth reveal spawns INVISIBLE (the cat36 reveal pops it in); a zone fade-in arrives visible.
+    spawn.common.display_flags = match reveal {
+        CarbuncleReveal::Birth => DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1,
+        CarbuncleReveal::ZoneFadeIn => DisplayFlag::UNK2 | DisplayFlag::UNK1,
+    };
     spawn.common.layout_id = 0;
     spawn.common.handler_id = Default::default();
     spawn.common.target_id = Default::default();
@@ -1872,14 +1907,15 @@ pub(crate) fn apply_summon_pet_effect(
     instance.insert_npc(pet_actor_id, spawn);
 
     if let Some(from_id) = network.lock().find_by_actor(from_actor_id) {
-        instance.insert_task(
-            from_id,
-            from_actor_id,
-            PET_REVEAL_DELAY,
-            QueuedTaskData::RevealPet {
+        let data = match reveal {
+            CarbuncleReveal::Birth => QueuedTaskData::RevealPet {
                 actor_id: pet_actor_id,
             },
-        );
+            CarbuncleReveal::ZoneFadeIn => QueuedTaskData::PetZoneFadeIn {
+                actor_id: pet_actor_id,
+            },
+        };
+        instance.insert_task(from_id, from_actor_id, PET_REVEAL_DELAY, data);
     }
 }
 
@@ -2200,6 +2236,24 @@ fn clear_demi_state(smn: &mut SummonerState) {
     smn.demi_enkindle_ready = false;
     smn.demi_finisher_ready = false;
     smn.demi_auto_attack_count = 0;
+}
+
+/// Reset the gauge-bearing SummonerState when a demi/primal is dropped by a zone transition and a
+/// fresh carbuncle is faded in at the destination. Retail (demi换区 capture) zeroes the SummonTimer,
+/// ReturnSummon, the three arcanum-ready bits and Aetherflow, but KEEPS the next-demi indicator
+/// (SOLAR_BAHAMUT_FIRST). Rather than hand-pack the gauge, clear the underlying state and let
+/// `build_summoner_gauge_data` re-derive it: `demi_phase == None` zeroes the SummonTimer and
+/// re-derives the next-demi bit from the untouched `next_demi`, while dropping the arcanum + Aetherflow
+/// flags yields the 0x08-only AetherFlags byte. `next_demi` is intentionally left untouched.
+pub(crate) fn reset_summoner_state_for_demi_zone(smn: &mut SummonerState) {
+    clear_demi_state(smn);
+    clear_primal_summon_timer(smn);
+    smn.ruby_arcanum = false;
+    smn.topaz_arcanum = false;
+    smn.emerald_arcanum = false;
+    smn.aetherflow_stacks = 0;
+    // A fresh carbuncle is out at the destination.
+    smn.carbuncle_summoned = true;
 }
 
 fn refresh_summoner_runtime_state(smn: &mut SummonerState) {
@@ -3093,6 +3147,15 @@ impl JobActors for Summoner {
         reinstate_carried_pet(network, instance, owner, carried);
     }
 
+    fn reinstate_carbuncle_after_demi_zone(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+    ) {
+        spawn_carbuncle_with_fade_in(network, instance, owner);
+    }
+
     fn on_demi_expired(
         &self,
         network: &mut NetworkState,
@@ -3158,6 +3221,48 @@ mod tests {
             Some(Instant::now() + Duration::from_secs(15));
         let data = build_summoner_gauge_data(&combat_state, 100);
         assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
+    }
+
+    /// Zoning mid-demi drops the demi and re-instates a fresh carbuncle: the gauge state must be
+    /// reset to match retail (demi换区 capture) — SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow
+    /// cleared, but the next-demi indicator (SOLAR_BAHAMUT_FIRST) kept. The reset clears the state and
+    /// lets `build_summoner_gauge_data` re-derive the gauge bytes.
+    #[test]
+    fn demi_zone_reset_clears_state_and_keeps_next_demi_bit() {
+        let mut smn = SummonerState::default();
+        smn.demi_phase = SummonerDemiPhase::SolarBahamut;
+        smn.demi_expires_at = Some(Instant::now() + Duration::from_secs(15));
+        smn.next_demi = SummonerNextDemi::SolarBahamutFirst;
+        smn.ruby_arcanum = true;
+        smn.topaz_arcanum = true;
+        smn.emerald_arcanum = true;
+        smn.aetherflow_stacks = 2;
+        smn.primal_summon_expires_at = Some(Instant::now() + Duration::from_secs(15));
+
+        reset_summoner_state_for_demi_zone(&mut smn);
+
+        assert_eq!(smn.demi_phase, SummonerDemiPhase::None);
+        assert_eq!(smn.demi_expires_at, None);
+        assert_eq!(smn.primal_summon_expires_at, None);
+        assert!(!smn.ruby_arcanum);
+        assert!(!smn.topaz_arcanum);
+        assert!(!smn.emerald_arcanum);
+        assert_eq!(smn.aetherflow_stacks, 0);
+        assert!(smn.carbuncle_summoned);
+        // The next-demi indicator survives the reset (re-derived by the gauge from `next_demi`).
+        assert_eq!(smn.next_demi, SummonerNextDemi::SolarBahamutFirst);
+
+        // The rebuilt gauge matches the retail post-zone bytes: AetherFlags 0x08 (SolarBahamut first
+        // only), SummonTimer 0, ReturnSummon 0.
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner = smn;
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(
+            aether_flags_byte(data),
+            SUMMONER_GAUGE_FLAG_SOLAR_BAHAMUT_FIRST_PRIMED
+        );
+        assert_eq!(summon_timer_word(data), 0);
+        assert_eq!(return_summon_byte(data), 0);
     }
 
     /// Trait 619: Solar primed bits must not leave the server under level sync.

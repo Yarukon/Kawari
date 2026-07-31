@@ -1384,6 +1384,20 @@ pub fn handle_zone_messages(
             // staying blank until the next action.
             let had_pet = combat_state.summoner.carbuncle_summoned;
             let carried_pet = combat_state.summoner.carried_pet.take();
+            // A demi/primal is deliberately not carried across a zone (see
+            // `take_combat_state_and_despawn_pets`), so `carried_pet` is None but the demi/primal
+            // timers are still set in the carried state. Detect that mid-demi transition here: retail
+            // drops the demi, resets the gauge (SummonTimer/ReturnSummon/arcanum/Aetherflow cleared,
+            // next-demi bit kept) and fades a FRESH carbuncle in. Reset the state BEFORE the gauge is
+            // built below so the re-sent gauge already reflects the reset.
+            let was_mid_demi = carried_pet.is_none()
+                && (combat_state.summoner.demi_expires_at.is_some()
+                    || combat_state.summoner.primal_summon_expires_at.is_some());
+            if was_mid_demi {
+                crate::server::jobs::summoner::reset_summoner_state_for_demi_zone(
+                    &mut combat_state.summoner,
+                );
+            }
             let class_job = player_spawn.common.class_job;
             let gauge_data = job_for(class_job).and_then(|job| {
                 job.build_gauge_data(&combat_state, player_spawn.common.level)
@@ -1429,6 +1443,14 @@ pub fn handle_zone_messages(
                         instance,
                         *from_actor_id,
                         carried,
+                    );
+                } else if was_mid_demi {
+                    // Demi/primal dropped by the zone: fade a fresh carbuncle in (cat267), no birth
+                    // reveal. The gauge state was already reset above.
+                    actors.reinstate_carbuncle_after_demi_zone(
+                        network.clone(),
+                        instance,
+                        *from_actor_id,
                     );
                 } else if had_pet {
                     actors.apply_summon_pet_effect(network.clone(), instance, *from_actor_id);

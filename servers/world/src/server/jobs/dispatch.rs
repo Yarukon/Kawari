@@ -187,6 +187,16 @@ pub(in crate::server) trait JobActors: Sync {
         carried: CarriedPet,
     );
 
+    /// Zone-in after a demi/primal was dropped (not carried): reset the gauge state and fade a FRESH
+    /// carbuncle in via cat267, instead of the cat36 birth reveal `apply_summon_pet_effect` plays.
+    /// Matches retail's mid-demi zone transition (see `spawn_carbuncle_with_fade_in`). Summoner only.
+    fn reinstate_carbuncle_after_demi_zone(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+    );
+
     /// mod.rs tick: the demi window just expired this refresh — tear down the demi actor, then
     /// re-spawn/re-bind carbuncle. `gauge_update` = the freshly-built `(gauge_class_job_id, gauge_data)`
     /// to re-send, or `None`. Delegates to `apply_demi_summon_revert`.
