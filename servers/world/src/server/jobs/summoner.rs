@@ -2239,12 +2239,17 @@ fn clear_demi_state(smn: &mut SummonerState) {
 }
 
 /// Reset the gauge-bearing SummonerState when a demi/primal is dropped by a zone transition and a
-/// fresh carbuncle is faded in at the destination. Retail (demi换区 capture) zeroes the SummonTimer,
-/// ReturnSummon, the three arcanum-ready bits and Aetherflow, but KEEPS the next-demi indicator
-/// (SOLAR_BAHAMUT_FIRST). Rather than hand-pack the gauge, clear the underlying state and let
-/// `build_summoner_gauge_data` re-derive it: `demi_phase == None` zeroes the SummonTimer and
-/// re-derives the next-demi bit from the untouched `next_demi`, while dropping the arcanum + Aetherflow
-/// flags yields the 0x08-only AetherFlags byte. `next_demi` is intentionally left untouched.
+/// fresh carbuncle is faded in at the destination. Retail (demi换区 capture, user-confirmed) leaves
+/// the SMN in the Solar Bahamut primed default state (烈日龙神预备阶段) with no three-primal ready
+/// bits: SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow cleared, and AetherFlags 0x08
+/// (SOLAR_BAHAMUT_FIRST_PRIMED). Rather than hand-pack the gauge, clear the underlying state and let
+/// `build_summoner_gauge_data` re-derive it.
+///
+/// `next_demi` is FORCED back to `SolarBahamutFirst`: during any active demi it has already been
+/// advanced past `SolarBahamutFirst` by `advance_summoner_next_demi_after_summon` (the only reachable
+/// mid-demi values are `Bahamut` during a Solar demi or `SolarBahamutSecond` during a Bahamut demi),
+/// so preserving it would yield AetherFlags 0x00 or 0x0C — never the 0x08 retail shows. Forcing the
+/// default primed state resets the burst cycle so the client resumes the Solar Bahamut oGCD rotation.
 pub(crate) fn reset_summoner_state_for_demi_zone(smn: &mut SummonerState) {
     clear_demi_state(smn);
     clear_primal_summon_timer(smn);
@@ -2252,6 +2257,8 @@ pub(crate) fn reset_summoner_state_for_demi_zone(smn: &mut SummonerState) {
     smn.topaz_arcanum = false;
     smn.emerald_arcanum = false;
     smn.aetherflow_stacks = 0;
+    // Reset the burst cycle to the default primed state (烈日龙神预备阶段) → AetherFlags 0x08.
+    smn.next_demi = SummonerNextDemi::SolarBahamutFirst;
     // A fresh carbuncle is out at the destination.
     smn.carbuncle_summoned = true;
 }
@@ -3224,15 +3231,19 @@ mod tests {
     }
 
     /// Zoning mid-demi drops the demi and re-instates a fresh carbuncle: the gauge state must be
-    /// reset to match retail (demi换区 capture) — SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow
-    /// cleared, but the next-demi indicator (SOLAR_BAHAMUT_FIRST) kept. The reset clears the state and
-    /// lets `build_summoner_gauge_data` re-derive the gauge bytes.
+    /// reset to match retail (demi换区 capture, user-confirmed) — the SMN returns to the Solar Bahamut
+    /// primed default (SummonTimer 0, ReturnSummon 0, arcanum + Aetherflow cleared, AetherFlags 0x08).
+    /// The pre-zone state here is the REACHABLE mid-Solar-demi one: `next_demi` has already been
+    /// advanced to `Bahamut`, so the reset must FORCE it back to `SolarBahamutFirst` (it is never
+    /// `SolarBahamutFirst` while a demi is running). The reset clears the state and lets
+    /// `build_summoner_gauge_data` re-derive the gauge bytes.
     #[test]
-    fn demi_zone_reset_clears_state_and_keeps_next_demi_bit() {
+    fn demi_zone_reset_primes_solar_bahamut_and_clears_the_rest() {
         let mut smn = SummonerState::default();
         smn.demi_phase = SummonerDemiPhase::SolarBahamut;
         smn.demi_expires_at = Some(Instant::now() + Duration::from_secs(15));
-        smn.next_demi = SummonerNextDemi::SolarBahamutFirst;
+        // Mid-Solar-demi `next_demi` is `Bahamut` (advanced past SolarBahamutFirst on summon).
+        smn.next_demi = SummonerNextDemi::Bahamut;
         smn.ruby_arcanum = true;
         smn.topaz_arcanum = true;
         smn.emerald_arcanum = true;
@@ -3249,7 +3260,8 @@ mod tests {
         assert!(!smn.emerald_arcanum);
         assert_eq!(smn.aetherflow_stacks, 0);
         assert!(smn.carbuncle_summoned);
-        // The next-demi indicator survives the reset (re-derived by the gauge from `next_demi`).
+        // The burst cycle is reset to the Solar Bahamut primed default, regardless of the mid-demi
+        // `next_demi` value.
         assert_eq!(smn.next_demi, SummonerNextDemi::SolarBahamutFirst);
 
         // The rebuilt gauge matches the retail post-zone bytes: AetherFlags 0x08 (SolarBahamut first
