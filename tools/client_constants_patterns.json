@@ -1,0 +1,94 @@
+{
+  "_comment": [
+    "Byte-pattern data for tools/extract_client_constants.py (T2).",
+    "Regenerate with:  T2_MODE=gen-patterns  on the RENAMED int-client 7.55 IDB.",
+    "unit -> size: bit=ceil(K/8), byte=K, byte_masked=K//8.",
+    "Patterns match instruction bytes only, so they are symbol-independent."
+  ],
+  "meta": {
+    "baseline_module": "ffxiv_dx11_worldwide_7_55.exe",
+    "baseline_imagebase": "0x140000000"
+  },
+  "targets": [
+    {
+      "key": "FRAMERS_KIT_BITMASK_SIZE",
+      "fn": "PlayerState.IsFramersKitUnlocked",
+      "baseline_rva": "0xbe2060",
+      "pattern": "B8 ?? ?? ?? ?? 4C 8B C9 66 3B D0 73 ?? 0F B7 CA",
+      "imm_offset": 1,
+      "imm_size": 4,
+      "unit": "bit",
+      "expect": 44
+    },
+    {
+      "key": "GATHERED_GATHERING_ITEMS_BITMASK_SIZE",
+      "fn": "QuestManager.IsGatheringItemGathered",
+      "baseline_rva": "0xe9464a",
+      "pattern": "8B D9 8B F9 C1 EB 03 83 FB ?? 72",
+      "imm_offset": 9,
+      "imm_size": 1,
+      "unit": "byte",
+      "expect": 104
+    },
+    {
+      "key": "COMPLETED_LEGACY_QUEST_BITMASK_SIZE",
+      "fn": "QuestManager.IsLegacyQuestComplete",
+      "baseline_rva": "0xdf7b70",
+      "pattern": "0F B7 C2 4C 8B C9 44 8B C0 49 C1 E8 03 49 83 F8 ?? 73",
+      "imm_offset": 16,
+      "imm_size": 1,
+      "unit": "byte",
+      "expect": 39
+    },
+    {
+      "key": "COMPLETED_QUEST_BITMASK_SIZE",
+      "fn": "QuestManager.IsQuestComplete1",
+      "baseline_rva": "0xdf6280",
+      "pattern": "0F B7 C2 4C 8B C9 44 8B C0 49 C1 E8 03 49 81 F8 ?? ?? ?? ?? 72",
+      "imm_offset": 16,
+      "imm_size": 4,
+      "unit": "byte",
+      "expect": 751
+    },
+    {
+      "key": "COMPLETED_RECIPES_BITMASK_SIZE",
+      "fn": "QuestManager.IsRecipeComplete",
+      "baseline_rva": "0xe9f4b7",
+      "pattern": "45 32 C0 C1 E9 03 81 F9 ?? ?? ?? ?? 73",
+      "imm_offset": 8,
+      "imm_size": 4,
+      "unit": "byte",
+      "expect": 801
+    },
+    {
+      "key": "UNLOCKED_MAP_MARKERS_BITMASK_SIZE",
+      "fn": "QuestManager.IsMapMarkerUnlocked",
+      "baseline_rva": "0xdf62d3",
+      "pattern": "44 8B C3 49 C1 E8 03 49 83 F8 ?? 73",
+      "imm_offset": 10,
+      "imm_size": 1,
+      "unit": "byte",
+      "expect": 64
+    },
+    {
+      "key": "UNLOCK_BITMASK_SIZE",
+      "fn": "UIState.SetUnlockLinkValue",
+      "baseline_rva": "0xc48d04",
+      "pattern": "8B C2 83 E0 F8 3D ?? ?? ?? ?? 73 ?? 44 8B CA 49 C1 E9 03",
+      "imm_offset": 6,
+      "imm_size": 4,
+      "unit": "byte_masked",
+      "expect": 92
+    },
+    {
+      "key": "ACTIVE_HELP_BITMASK_SIZE",
+      "fn": "UIState.AnnounceHowTo",
+      "baseline_rva": "0xc4994a",
+      "pattern": "8B D3 83 E2 F8 81 FA ?? ?? ?? ?? 73",
+      "imm_offset": 7,
+      "imm_size": 4,
+      "unit": "byte_masked",
+      "expect": 38
+    }
+  ]
+}
