@@ -2418,7 +2418,12 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
         summon_timer = 0;
     }
 
-    let carbuncle: u8 = if smn.carbuncle_summoned {
+    // ReturnSummon (byte 4) is the pet to RESTORE when the active demi/primal ends, per
+    // FFXIVClientStructs `SummonerGauge` — NOT a "carbuncle present" flag. The live carbuncle
+    // is conveyed to the client by the pet actor (SetupPet), so this byte is 0 during normal
+    // play and only names the return pet (currently always the base carbuncle, 23) while a
+    // demi/primal holds it. `summon_expires_at` being Some is exactly "a summon is active".
+    let return_summon: u8 = if summon_expires_at.is_some() {
         SUMMONER_GAUGE_CARBUNCLE
     } else {
         0
@@ -2429,7 +2434,7 @@ pub(crate) fn build_summoner_gauge_data(combat_state: &PlayerCombatState, level:
     //   5 ReturnSummonGlam | 6 Attunement | 7 AetherFlags
     (summon_timer as u64)
         | ((attunement_timer as u64) << 16)
-        | ((carbuncle as u64) << 32)
+        | ((return_summon as u64) << 32)
         | ((attunement as u64) << 48)
         | ((aether_flags as u64) << 56)
 }
@@ -3122,6 +3127,37 @@ mod tests {
 
     fn summon_timer_word(data: u64) -> u16 {
         data as u16
+    }
+
+    fn return_summon_byte(data: u64) -> u8 {
+        (data >> 32) as u8
+    }
+
+    /// `ReturnSummon` (byte 4) is the pet to RESTORE when a demi/primal ends, not a
+    /// "carbuncle is present" flag. It must be the base pet (23) only while a demi/primal
+    /// holds the carbuncle for return, and 0 otherwise — the live carbuncle is conveyed by
+    /// the pet actor, not this byte. Confirmed against FFXIVClientStructs `SummonerGauge`.
+    #[test]
+    fn gauge_return_summon_only_during_demi() {
+        // Carbuncle out, no demi/primal → byte 4 is 0.
+        let mut combat_state = PlayerCombatState::default();
+        combat_state.summoner.carbuncle_summoned = true;
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), 0);
+
+        // Mid-demi with the carbuncle held for return → byte 4 is the base pet (23).
+        combat_state.summoner.demi_phase = SummonerDemiPhase::SolarBahamut;
+        combat_state.summoner.demi_expires_at = Some(Instant::now() + Duration::from_secs(15));
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
+
+        // Same during an active primal summon.
+        combat_state.summoner.demi_phase = SummonerDemiPhase::None;
+        combat_state.summoner.demi_expires_at = None;
+        combat_state.summoner.primal_summon_expires_at =
+            Some(Instant::now() + Duration::from_secs(15));
+        let data = build_summoner_gauge_data(&combat_state, 100);
+        assert_eq!(return_summon_byte(data), SUMMONER_GAUGE_CARBUNCLE);
     }
 
     /// Trait 619: Solar primed bits must not leave the server under level sync.
