@@ -2253,6 +2253,10 @@ fn clear_demi_state(smn: &mut SummonerState) {
 pub(crate) fn reset_summoner_state_for_demi_zone(smn: &mut SummonerState) {
     clear_demi_state(smn);
     clear_primal_summon_timer(smn);
+    // Clear attunement too: `was_mid_demi` also fires for a primal-only zone (Summon Ifrit sets
+    // Ruby attunement + stacks + expiry), which retail clears — start_demi_phase already clears it
+    // for the demi case, so this covers the primal-only path.
+    clear_attunement(smn);
     smn.ruby_arcanum = false;
     smn.topaz_arcanum = false;
     smn.emerald_arcanum = false;
@@ -3206,6 +3210,10 @@ mod tests {
         (data >> 32) as u8
     }
 
+    fn attunement_byte(data: u64) -> u8 {
+        (data >> 48) as u8
+    }
+
     /// `ReturnSummon` (byte 4) is the pet to RESTORE when a demi/primal ends, not a
     /// "carbuncle is present" flag. It must be the base pet (23) only while a demi/primal
     /// holds the carbuncle for return, and 0 otherwise — the live carbuncle is conveyed by
@@ -3257,6 +3265,10 @@ mod tests {
         smn.topaz_arcanum = true;
         smn.emerald_arcanum = true;
         smn.aetherflow_stacks = 2;
+        // Attunement (as a primal-only zone would carry: Ruby + stacks + expiry) must be cleared too.
+        smn.attunement = SummonerAttunement::Ruby;
+        smn.attunement_stacks = 2;
+        smn.attunement_expires_at = Some(Instant::now() + Duration::from_secs(30));
         smn.primal_summon_expires_at = Some(Instant::now() + Duration::from_secs(15));
 
         reset_summoner_state_for_demi_zone(&mut smn);
@@ -3268,6 +3280,9 @@ mod tests {
         assert!(!smn.topaz_arcanum);
         assert!(!smn.emerald_arcanum);
         assert_eq!(smn.aetherflow_stacks, 0);
+        assert_eq!(smn.attunement, SummonerAttunement::None);
+        assert_eq!(smn.attunement_stacks, 0);
+        assert_eq!(smn.attunement_expires_at, None);
         assert!(smn.carbuncle_summoned);
         // The burst cycle is reset to the Solar Bahamut primed default, regardless of the mid-demi
         // `next_demi` value.
@@ -3284,6 +3299,8 @@ mod tests {
         );
         assert_eq!(summon_timer_word(data), 0);
         assert_eq!(return_summon_byte(data), 0);
+        // Attunement (byte 6) is cleared by the reset (covers the primal-only zone case).
+        assert_eq!(attunement_byte(data), 0);
     }
 
     /// Trait 619: Solar primed bits must not leave the server under level sync.
