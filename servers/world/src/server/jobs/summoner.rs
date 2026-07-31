@@ -17,8 +17,8 @@ use crate::{
     server::{
         actor::{NetworkedActor, NpcState},
         combat_state::{
-            PlayerCombatState, SummonerAttunement, SummonerDemiPhase, SummonerNextDemi,
-            SummonerState,
+            CarriedPet, PlayerCombatState, SummonerAttunement, SummonerDemiPhase,
+            SummonerNextDemi, SummonerState,
         },
         instance::{Instance, QueuedTaskData},
         jobs::dispatch::{
@@ -34,10 +34,10 @@ use kawari::{
         ObjectTypeKind, Position,
     },
     ipc::zone::{
-        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, BattleNpcSubKind,
-        CharacterDataFlag, DamageElement, DamageType, DisplayFlag, ObjectKind, ServerZoneIpcData,
-        ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect, StatusEffectList, TargetEffect,
-        TargetEffectKind,
+        ActionEffect1, ActionRequest, ActionType, ActorControlCategory, ActorSetPos,
+        BattleNpcSubKind, CharacterDataFlag, DamageElement, DamageType, DisplayFlag, ObjectKind,
+        ServerZoneIpcData, ServerZoneIpcSegment, SpawnNpc, SpawnObject, StatusEffect,
+        StatusEffectList, TargetEffect, TargetEffectKind, WarpType,
     },
 };
 
@@ -1816,6 +1816,157 @@ pub(crate) fn apply_summon_pet_effect(
     }
 }
 
+/// Builds the destination spawn for a carried pet: takes the captured `spawn`, relocates it beside
+/// the owner's NEW position/rotation (same math as `apply_summon_pet_effect`), and clears the
+/// INVISIBLE flag so it arrives visible (a fade-in, not a birth animation). All identity/state
+/// (model, pet_id, owner_id, hp/mp, level, name, base_id) is preserved from the capture. Pure/
+/// disk-free so it can be unit-tested without `insert_npc`'s timeline load.
+fn reinstated_pet_spawn(mut spawn: SpawnNpc, owner_position: Position, owner_rotation: f32) -> SpawnNpc {
+    let mut pet_position = owner_position;
+    pet_position.0.x += owner_rotation.sin() * SUMMONER_PET_SPAWN_DISTANCE;
+    pet_position.0.z += owner_rotation.cos() * SUMMONER_PET_SPAWN_DISTANCE;
+    let pet_rotation = rotate_towards(pet_position.0, owner_position.0, owner_rotation);
+
+    spawn.common.position = pet_position;
+    spawn.common.rotation = pet_rotation;
+    // Strip INVISIBLE: the pet arrives visible and is faded in (cat267), never reveal-popped.
+    spawn.common.display_flags.remove(DisplayFlag::INVISIBLE);
+    spawn
+}
+
+/// Re-instate a pet carried across a zone transition (see [`CarriedPet`]) with the SAME object id it
+/// had at the source, so no re-summon / birth animation plays. Mirrors the destination unpark +
+/// fade-in sequence retail sends on the pet (`SetPetEntityId`→0 + cat267 ActorFadeIn + Targetable(1)
+/// + mount_state→0) rather than the fresh-summon spawn+reveal path. Does NOT schedule `RevealPet`.
+pub(crate) fn reinstate_carried_pet(
+    network: Arc<Mutex<NetworkState>>,
+    instance: &mut Instance,
+    from_actor_id: ObjectId,
+    carried: CarriedPet,
+) {
+    // Collision guard: if an actor already holds this id (should never happen), fall back to a
+    // fresh summon rather than clobbering it.
+    if instance.actors.contains_key(&carried.actor_id) {
+        apply_summon_pet_effect(network, instance, from_actor_id);
+        return;
+    }
+
+    if let Some(NetworkedActor::Player { combat_state, .. }) = instance.find_actor_mut(from_actor_id)
+    {
+        combat_state.summoner.carbuncle_summoned = true;
+    }
+
+    let Some(owner) = instance.find_actor(from_actor_id) else {
+        return;
+    };
+    let level = owner.get_common_spawn().level;
+    let owner_position = owner.position();
+    let owner_rotation = owner.rotation();
+
+    let pet_actor_id = carried.actor_id;
+    let spawn = reinstated_pet_spawn(carried.spawn, owner_position, owner_rotation);
+    let pet_id = spawn.common.pet_id;
+    let pet_position = spawn.common.position;
+    let pet_rotation = spawn.common.rotation;
+    let pet_hp = spawn.common.max_health_points;
+    let pet_mp = spawn.common.max_resource_points;
+
+    {
+        let mut network = network.lock();
+        // Re-bind the pet bar to the carried actor id (mirror the fresh-summon SetupPet path, but
+        // reusing the existing object id instead of allocating a new one).
+        send_summoner_pet_parameters(&mut network, from_actor_id, pet_id);
+        network.send_to_by_actor_id(
+            from_actor_id,
+            FromServer::ActorControlSelf(ActorControlCategory::SetupPet {
+                owner_id: from_actor_id,
+                pet_id,
+                pet_actor_id,
+                unk2: 1,
+                unk3: 1,
+            }),
+            DestinationNetwork::ZoneClients,
+        );
+        send_summoner_pet_parameters(&mut network, from_actor_id, pet_id);
+        send_initial_pet_status_list(
+            &mut network,
+            from_actor_id,
+            pet_actor_id,
+            level,
+            pet_hp,
+            pet_hp,
+            pet_mp,
+            pet_mp,
+        );
+    }
+
+    // Insert under the SAME id (the pet actor never carries meaningful statuses — all SMN runtime
+    // state lives on the owner's SummonerState and the pet's wire status list is always sent empty,
+    // so plain `insert_npc` is sufficient; `carried.status_effects` is intentionally not restored).
+    let _ = &carried.status_effects;
+    instance.insert_npc(pet_actor_id, spawn);
+
+    let mut network = network.lock();
+    // Destination unpark + fade-in: SetPetEntityId→0, cat267 (ActorFadeIn), Targetable(1),
+    // mount_state→0 — the same toggle sequence as `sync_pet_after_dismount`.
+    network.send_to_by_actor_id(
+        from_actor_id,
+        FromServer::ActorControlSelf(ActorControlCategory::SetPetEntityId { unk1: 0 }),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 267,
+                param1: 0,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::ActorControl(
+            pet_actor_id,
+            ActorControlCategory::Unknown {
+                category: 54,
+                param1: 1,
+                param2: 0,
+                param3: 0,
+                param4: 0,
+                param5: 0,
+            },
+        ),
+        DestinationNetwork::ZoneClients,
+    );
+
+    let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
+    send_summoner_pet_parameters_with_flags(&mut network, from_actor_id, pet_id, unk3, unk4);
+
+    // Snap the pet to its recomputed position beside the owner at the destination (retail sends an
+    // ActorSetPos on the pet post-ZoneIn), so observers already present see it at the right spot.
+    let segment = ServerZoneIpcSegment::new(ServerZoneIpcData::ActorSetPos(ActorSetPos {
+        position: pet_position,
+        rotation: pet_rotation,
+        warp_type: WarpType::Normal,
+        warp_type_arg: 2,
+        ..Default::default()
+    }));
+    network.send_in_range_inclusive_instance(
+        pet_actor_id,
+        instance,
+        FromServer::PacketSegment(segment, pet_actor_id),
+        DestinationNetwork::ZoneClients,
+    );
+}
+
 pub(crate) fn schedule_demi_auto_attack(instance: &mut Instance, owner_id: ObjectId) {
     instance.insert_task(
         ClientId::default(),
@@ -2892,6 +3043,16 @@ impl JobActors for Summoner {
         apply_summon_pet_effect(network, instance, owner);
     }
 
+    fn reinstate_carried_pet(
+        &self,
+        network: Arc<Mutex<NetworkState>>,
+        instance: &mut Instance,
+        owner: ObjectId,
+        carried: CarriedPet,
+    ) {
+        reinstate_carried_pet(network, instance, owner, carried);
+    }
+
     fn on_demi_expired(
         &self,
         network: &mut NetworkState,
@@ -3089,5 +3250,41 @@ mod tests {
         } else {
             panic!("owner should still be a Player actor");
         }
+    }
+
+    /// A carried pet re-instated at the destination arrives VISIBLE (INVISIBLE stripped) and keeps
+    /// all its identity/state — the fresh-summon INVISIBLE+reveal (birth animation) path is avoided.
+    #[test]
+    fn reinstated_pet_spawn_arrives_visible_and_preserves_identity() {
+        let mut spawn = SpawnNpc::default();
+        spawn.common.base_id = 42;
+        spawn.common.name_id = 7;
+        spawn.common.pet_id = SUMMONER_PET_HOTBAR_CARBUNCLE;
+        spawn.common.owner_id = ObjectId(1);
+        spawn.common.model_chara = 411;
+        spawn.common.level = 90;
+        spawn.common.max_health_points = 12345;
+        spawn.common.health_points = 12345;
+        // As captured at the source: fresh summons are spawned INVISIBLE then revealed; a carried
+        // pet must NOT keep that flag.
+        spawn.common.display_flags = DisplayFlag::UNK2 | DisplayFlag::INVISIBLE | DisplayFlag::UNK1;
+
+        let owner_position = Position(Vec3::new(100.0, 0.0, 200.0));
+        let owner_rotation = 0.0_f32;
+        let out = reinstated_pet_spawn(spawn, owner_position, owner_rotation);
+
+        // Arrives visible: no birth-animation reveal, just a fade-in.
+        assert!(!out.common.display_flags.contains(DisplayFlag::INVISIBLE));
+        // Identity/state preserved from the capture.
+        assert_eq!(out.common.base_id, 42);
+        assert_eq!(out.common.name_id, 7);
+        assert_eq!(out.common.pet_id, SUMMONER_PET_HOTBAR_CARBUNCLE);
+        assert_eq!(out.common.owner_id, ObjectId(1));
+        assert_eq!(out.common.model_chara, 411);
+        assert_eq!(out.common.level, 90);
+        assert_eq!(out.common.max_health_points, 12345);
+        // Repositioned beside the owner's NEW position (rotation 0 => +z by the spawn distance).
+        assert!((out.common.position.0.z - (200.0 + SUMMONER_PET_SPAWN_DISTANCE)).abs() < 1e-3);
+        assert!((out.common.position.0.x - 100.0).abs() < 1e-3);
     }
 }
