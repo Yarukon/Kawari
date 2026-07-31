@@ -1327,7 +1327,7 @@ pub fn handle_zone_messages(
                 parameters,
                 dueling_opponent_id,
                 remove_cooldowns,
-                combat_state,
+                mut combat_state,
                 last_combo_action,
                 combo_sequence,
                 hated_by,
@@ -1366,9 +1366,11 @@ pub fn handle_zone_messages(
             };
 
             // Read what we need from the carried combat_state before it's moved into the actor:
-            // whether a pet was summoned, and (for jobs with one) the job-gauge bytes to re-send so
-            // the gauge shows immediately instead of staying blank until the next action.
+            // whether a pet was summoned, the pet snapshot to re-instate (if any), and (for jobs
+            // with one) the job-gauge bytes to re-send so the gauge shows immediately instead of
+            // staying blank until the next action.
             let had_pet = combat_state.summoner.carbuncle_summoned;
+            let carried_pet = combat_state.summoner.carried_pet.take();
             let class_job = player_spawn.common.class_job;
             let gauge_data = job_for(class_job).and_then(|job| {
                 job.build_gauge_data(&combat_state, player_spawn.common.level)
@@ -1394,19 +1396,30 @@ pub fn handle_zone_messages(
                 last_enmity_sent: Vec::new(),
             };
 
-            // Now that the player actor exists at its new position, re-summon their pet beside them
-            // — unless one is already present (a same-zone reload won't have despawned it).
-            if had_pet
-                && !instance.actors.values().any(|actor| {
-                    matches!(
-                        actor,
-                        NetworkedActor::Npc { spawn, .. }
-                            if spawn.common.owner_id == *from_actor_id
-                    )
-                })
+            // Now that the player actor exists at its new position, restore their pet beside them —
+            // unless one is already present (a same-zone reload won't have despawned it). Prefer
+            // re-instating the carried pet (same object id, fade-in, NO birth animation); only fall
+            // back to a fresh summon (birth animation) when nothing was carried across.
+            let pet_already_present = instance.actors.values().any(|actor| {
+                matches!(
+                    actor,
+                    NetworkedActor::Npc { spawn, .. }
+                        if spawn.common.owner_id == *from_actor_id
+                )
+            });
+            if !pet_already_present
                 && let Some(actors) = job_for(class_job).and_then(Job::persistent_actors)
             {
-                actors.apply_summon_pet_effect(network.clone(), instance, *from_actor_id);
+                if let Some(carried) = carried_pet {
+                    actors.reinstate_carried_pet(
+                        network.clone(),
+                        instance,
+                        *from_actor_id,
+                        carried,
+                    );
+                } else if had_pet {
+                    actors.apply_summon_pet_effect(network.clone(), instance, *from_actor_id);
+                }
             }
 
             // Re-send the job gauge so the carried-over state shows immediately (the zone-in setup
