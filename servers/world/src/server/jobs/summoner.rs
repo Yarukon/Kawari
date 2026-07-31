@@ -1967,8 +1967,7 @@ pub(crate) fn reinstate_carried_pet(
 
     // Insert under the SAME id (the pet actor never carries meaningful statuses — all SMN runtime
     // state lives on the owner's SummonerState and the pet's wire status list is always sent empty,
-    // so plain `insert_npc` is sufficient; `carried.status_effects` is intentionally not restored).
-    let _ = &carried.status_effects;
+    // so plain `insert_npc` is sufficient).
     instance.insert_npc(pet_actor_id, spawn);
 
     let from_id = {

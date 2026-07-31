@@ -1007,7 +1007,6 @@ pub fn take_combat_state_and_despawn_pets(
                 if let NetworkedActor::Npc {
                     state: npc_state,
                     spawn,
-                    status_effects,
                     ..
                 } = actor
                     && spawn.common.owner_id == actor_id
@@ -1018,7 +1017,6 @@ pub fn take_combat_state_and_despawn_pets(
                     state.summoner.carried_pet = Some(CarriedPet {
                         actor_id: *id,
                         spawn: spawn.clone(),
-                        status_effects: status_effects.clone(),
                     });
                     break;
                 }

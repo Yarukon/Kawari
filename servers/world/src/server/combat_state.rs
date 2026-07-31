@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::StatusEffects;
 use kawari::{common::ObjectId, ipc::zone::SpawnNpc};
 
 use super::jobs::bard::BardState;
@@ -38,7 +37,6 @@ pub enum SummonerNextDemi {
 pub struct CarriedPet {
     pub actor_id: ObjectId,
     pub spawn: SpawnNpc,
-    pub status_effects: StatusEffects,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -83,9 +81,9 @@ pub struct SummonerState {
     pub carried_pet: Option<CarriedPet>,
 }
 
-// Hand-written to skip the transient `carried_pet` (its `SpawnNpc`/`StatusEffects` are not
-// `PartialEq`), mirroring `QueuedTask`'s impl that skips its non-comparable `data`. `carried_pet` is
-// `#[serde(skip)]` carry state, never part of a summoner's persisted equality.
+// Hand-written to skip the transient `carried_pet` (its `SpawnNpc` is not `PartialEq`), mirroring
+// `QueuedTask`'s impl that skips its non-comparable `data`. `carried_pet` is `#[serde(skip)]` carry
+// state, never part of a summoner's persisted equality.
 impl PartialEq for SummonerState {
     fn eq(&self, other: &Self) -> bool {
         self.carbuncle_summoned == other.carbuncle_summoned
