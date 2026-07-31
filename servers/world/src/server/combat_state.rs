@@ -85,6 +85,8 @@ pub struct SummonerState {
 // `QueuedTask`'s impl that skips its non-comparable `data`. `carried_pet` is `#[serde(skip)]` carry
 // state, never part of a summoner's persisted equality.
 impl PartialEq for SummonerState {
+    // NOTE: when adding a field to SummonerState, add it here too (except transient #[serde(skip)]
+    // carry state like carried_pet). This impl is hand-written to skip non-PartialEq carry state.
     fn eq(&self, other: &Self) -> bool {
         self.carbuncle_summoned == other.carbuncle_summoned
             && self.attunement == other.attunement
