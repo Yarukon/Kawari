@@ -66,8 +66,10 @@ BASELINE_TARGETS = [
      "B8 ?? ?? ?? ?? 4C 8B C9 66 3B D0 73 ?? 0F B7 CA", 1, 4, "bit", 44),
     ("GATHERED_GATHERING_ITEMS_BITMASK_SIZE", "QuestManager.IsGatheringItemGathered", 0xE9464A,
      "8B D9 8B F9 C1 EB 03 83 FB ?? 72", 9, 1, "byte", 104),
-    ("COMPLETED_LEGACY_QUEST_BITMASK_SIZE", "QuestManager.IsLegacyQuestComplete", 0xDF7B70,
-     "0F B7 C2 4C 8B C9 44 8B C0 49 C1 E8 03 49 83 F8 ?? 73", 16, 1, "byte", 39),
+    # COMPLETED_LEGACY_QUEST_BITMASK_SIZE is intentionally NOT extracted: FFXIV 1.x quest
+    # completion flags are discontinued content (frozen since 2012), so the client's
+    # IsLegacyQuestComplete bound never moves. It is pinned manually in constants.yml (D tier)
+    # rather than kept as a pattern that could fail-fast the whole tool for a dead constant.
     ("COMPLETED_QUEST_BITMASK_SIZE", "QuestManager.IsQuestComplete1", 0xDF6280,
      "0F B7 C2 4C 8B C9 44 8B C0 49 C1 E8 03 49 81 F8 ?? ?? ?? ?? 72", 16, 4, "byte", 751),
     ("COMPLETED_RECIPES_BITMASK_SIZE", "QuestManager.IsRecipeComplete", 0xE9F4B7,
