@@ -59,10 +59,19 @@ pub struct PlayerSetup {
     pub tofu_timestamp: u32,
     /// 0x5C..0x5D
     pub unknown_after_tofu: [u8; 2],
-    /// 0x5E..0x65 - 4 x u16 -> PvPProfile+0x16..0x1C (unnamed area 0x14-0x23 between GC
-    /// ranks and Series). All 0 in retail; no real reader found (searched PvP* code -
-    /// 0x16/0x18/0x1A/0x1C hits are other structs' offsets). Likely reserved/dead.
-    pub pvp_unknowns: [u16; 4],
+    /// 0x5E (u16) -> PvPProfile+0x16 = lifetime PvP total matches (all modes, not weekly-reset).
+    /// User-confirmed against the achievement 狱中古狼 (total PvP matches); retail capture 1606.
+    pub pvp_total_matches: u16,
+    /// 0x60 (u16) -> PvPProfile+0x18 = lifetime PvP total wins (all modes, not weekly-reset).
+    /// User-confirmed against the achievement 凶狼狂啸 (PvP victories); retail capture 835.
+    pub pvp_total_wins: u16,
+    /// 0x62 (u16) -> PvPProfile+0x1A = weekly PvP matches. Zeroed on weekly reset (ActorControl
+    /// cat 852 sub 3). Inferred from the reset semantics + Sapphire PvPWeeklyMatchCount; retail 39.
+    /// (Weekly split not independently achievement-confirmed.)
+    pub pvp_weekly_matches: u16,
+    /// 0x64 (u16) -> PvPProfile+0x1C = weekly PvP wins. Zeroed on weekly reset. Inferred from the
+    /// reset semantics + Sapphire PvPWeeklyWinCount; retail 22. (Not achievement-confirmed.)
+    pub pvp_weekly_wins: u16,
     /// 0x66..0x67 -> PvPProfile+0x28 = SeriesExperience. Retail: 0.
     pub pvp_series_exp: u16,
     /// How many player commendations you received.
