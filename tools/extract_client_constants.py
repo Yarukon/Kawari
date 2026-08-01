@@ -88,6 +88,12 @@ BASELINE_TARGETS = [
     # (returns K unchanged), which is numerically correct even though there is no >>3 shift.
     ("CONTENT_ROULETTE_ARRAY_SIZE", "ContentRoulette.CanGetAwards", 0xC24490,
      "80 78 47 0C 7D ?? 0F B6 4B 08", 3, 1, "byte", 12),
+    # Map-discovery arrays: MapDiscoveryManager reads exactly 162 u16 then 49 u32 (unit=byte here
+    # means "direct element count", same convention as CONTENT_ROULETTE — no >>3 shift).
+    ("MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE", "MapDiscoveryManager.ReadDiscoveryListPacket", 0x85E744,
+     "C0 E9 07 88 48 FD 81 FB A2 00 00 00 0F 82", 8, 4, "byte", 162),
+    ("MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE", "MapDiscoveryManager.sub_14085EF00", 0x85F0CF,
+     "88 48 FD 41 83 FB 31 0F 82", 6, 1, "byte", 49),
 ]
 
 # --------------------------------------------------------------------------

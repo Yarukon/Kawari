@@ -14,7 +14,8 @@ use crate::{
         CRYSTALLINE_CONFLICT_ARRAY_SIZE,
         CUTSCENE_SEEN_BITMASK_SIZE, DUNGEON_ARRAY_SIZE, FISHING_RECORD_TYPE_ARRAY_SIZE,
         FRAMERS_KIT_BITMASK_SIZE, FRONTLINE_ARRAY_SIZE, GLASSES_STYLES_BITMASK_SIZE,
-        GUILDHEST_ARRAY_SIZE, MASKED_CARNIVALE_ARRAY_SIZE, MINION_BITMASK_SIZE,
+        GUILDHEST_ARRAY_SIZE, MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE,
+        MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE, MASKED_CARNIVALE_ARRAY_SIZE, MINION_BITMASK_SIZE,
         MISC_CONTENT_ARRAY_SIZE, MOUNT_BITMASK_SIZE, ORCHESTRION_ROLL_BITMASK_SIZE,
         ORNAMENT_BITMASK_SIZE, RAID_ARRAY_SIZE, SATISFACTION_NPC_ARRAY_SIZE,
         SECRET_RECIPE_BOOK_BITMASK_SIZE, SPECIAL_CONTENT_ARRAY_SIZE, TRIAL_ARRAY_SIZE,
@@ -256,14 +257,14 @@ pub struct PlayerSetup {
     pub ps_plus_free_aetheryte_id: u16,
     /// Free Aetheryte for Nintendo Switch Online members.
     pub nso_free_aetheryte_id: u16,
-    // TODO maps_with_up_to_16_regions and maps_with_up_to_32_regions are also required auto ARRAY_SIZE
-    #[br(count = 162)]
-    #[bw(pad_size_to = 162 * 2)]
+    #[br(count = MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE)]
+    #[bw(pad_size_to = MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE * 2)]
     pub maps_with_up_to_16_regions: Vec<u16>,
-    #[br(count = 48)]
-    #[bw(pad_size_to = 48 * 4)]
+    /// 49 u32 (the client's MapDiscoveryManager reads exactly 49 slots for maps with 17..32 regions).
+    /// Previously modelled as 48 + a 4-byte padding field; that "padding" was the 49th slot.
+    #[br(count = MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE)]
+    #[bw(pad_size_to = MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE * 4)]
     pub maps_with_up_to_32_regions: Vec<u32>,
-    pub padding_probably_after_discovery_related_unk2: [u8; 4],
     /// Which Active Help guides the player has seen.
     #[br(count = ACTIVE_HELP_BITMASK_SIZE)]
     #[bw(pad_size_to = ACTIVE_HELP_BITMASK_SIZE)]
