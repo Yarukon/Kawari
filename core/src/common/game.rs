@@ -407,7 +407,7 @@ impl HandlerType {
     /// Determine the correct handler for use in this zone.
     pub fn from_intended_use(intended_use: TerritoryIntendedUse) -> Option<Self> {
         match intended_use {
-            TerritoryIntendedUse::OpenWorld => Some(Self::Fate),
+            TerritoryIntendedUse::Overworld => Some(Self::Fate),
             TerritoryIntendedUse::Dungeon => Some(Self::InstanceContent),
             TerritoryIntendedUse::VariantDungeon => Some(Self::InstanceContent),
             TerritoryIntendedUse::DeepDungeon => Some(Self::InstanceContent),
@@ -419,13 +419,13 @@ impl HandlerType {
             TerritoryIntendedUse::Frontline => Some(Self::InstanceContent),
             TerritoryIntendedUse::TripleTriadInvitationalParlor => Some(Self::InstanceContent),
             TerritoryIntendedUse::CriterionDungeon => Some(Self::InstanceContent),
-            TerritoryIntendedUse::SavageCriterionDungeon => Some(Self::InstanceContent),
+            TerritoryIntendedUse::CriterionDungeonSavage => Some(Self::InstanceContent),
             TerritoryIntendedUse::RivalWings => Some(Self::InstanceContent),
-            TerritoryIntendedUse::TreasureDungeon => Some(Self::InstanceContent),
+            TerritoryIntendedUse::TreasureMapInstance => Some(Self::InstanceContent),
             TerritoryIntendedUse::CosmicExploration => Some(Self::MassivePcContent),
-            TerritoryIntendedUse::OpenWorldInstanceBattle => Some(Self::QuestBattle),
+            TerritoryIntendedUse::PreEwOverworldQuestBattle => Some(Self::QuestBattle),
             TerritoryIntendedUse::LeapOfFaith => Some(Self::PublicContent),
-            TerritoryIntendedUse::Jail => Some(Self::Jail),
+            TerritoryIntendedUse::MordionGaol => Some(Self::Jail),
             TerritoryIntendedUse::GoldSaucer => Some(Self::GoldSaucer),
             TerritoryIntendedUse::OceanFishing => Some(Self::InstanceContent),
             TerritoryIntendedUse::OccultCrescent => Some(Self::PublicContent), // TODO: Also initializes a FATE director but we can't do that currently!
@@ -1158,7 +1158,7 @@ pub struct CrestData {
 pub fn is_private_area(intended_use: TerritoryIntendedUse) -> bool {
     // TODO: Maybe this exists on the Excel sheet?
     intended_use == TerritoryIntendedUse::Inn
-        || intended_use == TerritoryIntendedUse::FreeCompanyGarrison
+        || intended_use == TerritoryIntendedUse::GrandCompanyBarracks
 }
 
 /// Returns the internal housing row used for certain sheets.

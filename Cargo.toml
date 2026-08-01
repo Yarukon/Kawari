@@ -140,4 +140,4 @@ nu-ansi-term = "0.50"
 # also depends on redstrate/physis, and a plain fork URL would put two
 # incompatible physis crates in the graph.
 [patch."https://github.com/redstrate/physis"]
-physis = { git = "https://github.com/Yarukon/Physis", rev = "e964f4ba3ea75d3701bf7058990d4b89c3ff444c" }
+physis = { git = "https://github.com/Yarukon/Physis", rev = "cbe7c47cda430e09649d3285f16d6d0a834216f8" }
