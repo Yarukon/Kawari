@@ -15,10 +15,10 @@ Every key in `resources/data/constants.yml` is owned by exactly one of:
   respective tooling, not by the size generators.
 
 The partition is asserted in code: `owned_keys_present_and_disjoint_from_client_fixed`
-(`tools/constants-gen/src/main.rs`) checks that all 18 T1 keys are present in `constants.yml` and
+(`tools/constants-gen/src/main.rs`) checks that all 23 T1 keys are present in `constants.yml` and
 disjoint from the client-fixed set (the T2 + D keys). T1 ∩ (T2 ∪ D) = ∅.
 
-## T1 — kawari-constants-gen (18 keys)
+## T1 — kawari-constants-gen (23 keys)
 
 | key | sheet | rule | unit |
 |---|---|---|---|
@@ -34,7 +34,12 @@ disjoint from the client-fixed set (the T2 + D keys). T1 ∩ (T2 ∪ D) = ∅.
 | ADVENTURE_BITMASK_SIZE | Adventure | Count | Div8 |
 | CHOCOBO_TAXI_STANDS_BITMASK_SIZE | ChocoboTaxiStand | Count | Div8 |
 | BUDDY_EQUIP_BITMASK_SIZE | BuddyEquip | Count | Div8 |
+| VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE | VVDNotebookContents | Count | Div8 |
+| SECRET_RECIPE_BOOK_BITMASK_SIZE | SecretRecipeBook | Count | Div8 |
+| CONTENTS_NOTE_BITMASK_SIZE | ContentsNote | Count | Div8 |
 | BEAST_TRIBE_ARRAY_SIZE | BeastTribe | CountMinus1 | Raw |
+| SATISFACTION_NPC_ARRAY_SIZE | SatisfactionNpc | CountMinus1 | Raw |
+| FISHING_RECORD_TYPE_ARRAY_SIZE | FishingRecordType | CountMinus1 | Raw |
 | MOUNT_BITMASK_SIZE | Mount | IndexField(Order) | Div8 |
 | CUTSCENE_SEEN_BITMASK_SIZE | CutsceneWorkIndex | IndexField(WorkIndex) | Div8 |
 | CAUGHT_FISH_BITMASK_SIZE | FishParameter | IndexRowIdWhere(IsInLog) | Div8 |
@@ -47,7 +52,7 @@ Rules: `Count` = max_row_id+1. `CountMinus1` = max_row_id (drops the empty row-0
 sentinels). `PopulatedRowIdPlus1` = max(row_id where the row is populated) + 1 (drops the trailing
 all-zero row). Unit: `Div8` = ceil(N/8), `Raw` = N.
 
-## T2 — extract_client_constants.py (7 keys)
+## T2 — extract_client_constants.py (11 keys)
 
 Client-fixed sizes with a clean inline bound in an `IsXxxUnlocked`-family guard. The IDA tool matches
 a byte pattern per function (symbol-independent, so it runs on int OR CN builds), reads the bound
@@ -65,6 +70,13 @@ index>>3), `byte_masked` = K/8 (guard tests index & ~7).
 | FRAMERS_KIT_BITMASK_SIZE | PlayerState.IsFramersKitUnlocked | bit |
 | UNLOCK_BITMASK_SIZE | UIState.SetUnlockLinkValue (setter) | byte_masked |
 | ACTIVE_HELP_BITMASK_SIZE | UIState.AnnounceHowTo (announce) | byte_masked |
+| TRIPLE_TRIAD_NPC_BITMASK_SIZE | UIState.IsTripleTriadNpcBeaten | byte |
+| CONTENT_ROULETTE_ARRAY_SIZE | ContentRoulette.CanGetAwards | byte |
+| MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE | MapDiscoveryManager.ReadDiscoveryListPacket | byte |
+| MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE | MapDiscoveryManager.sub_14085EF00 | byte |
+
+Note: for CONTENT_ROULETTE and the two MAPS_ keys, `unit=byte` means "direct element count" (the guard
+tests a plain array index `< K`, no `>>3` shift), not the bitmask `index>>3 < K` form.
 
 Note: these sizes drive both the wire layout (`#[br(count)]`/`#[bw(pad_size_to)]` in the zone server
 IPC) and the DB bitmask width (`Bitmask<N>`/`QuestBitmask<N>` in `servers/world/src/database/models.rs`

@@ -1,7 +1,7 @@
 //! Regenerates the EXD-derivable size constants in `resources/data/constants.yml`.
 //!
-//! This tool owns EXACTLY the 18 keys in [`DESCRIPTORS`] and nothing else. It reads the game's
-//! Excel sheets, derives each size from the live data, and rewrites *only* those 18 lines of
+//! This tool owns EXACTLY the 23 keys in [`DESCRIPTORS`] and nothing else. It reads the game's
+//! Excel sheets, derives each size from the live data, and rewrites *only* those 23 lines of
 //! `constants.yml` in place -- every other line (key order, comments, list blocks) is preserved
 //! byte-for-byte. The three "stale-looking" client-fixed values
 //! (`GATHERED_GATHERING_ITEMS`, `UNLOCKED_FISHING_SPOTS`, `CLASSJOB_ARRAY_SIZE`) are NOT owned here.
@@ -15,7 +15,7 @@
 //! # Running the tests
 //!
 //! The arithmetic and rewriter tests are data-independent and always run. The golden test that
-//! pins all 18 values against a real install is `#[ignore]`d (CI has no game data):
+//! pins all 23 values against a real install is `#[ignore]`d (CI has no game data):
 //!
 //! ```text
 //! cargo test -p kawari-constants-gen -- --include-ignored
@@ -58,7 +58,12 @@ impl Unit {
 enum Rule {
     /// `N = max_row_id + 1` (dense row-id sheets: the bit count equals the row count).
     Count,
-    /// `N = (max_row_id + 1) - 1` -- a per-element array whose row 0 is an empty header slot.
+    /// `N = row_count - 1` -- a per-element array with exactly ONE non-data row to drop (an empty
+    /// row-0 header for BeastTribe/SatisfactionNpc, or an empty trailing sentinel for
+    /// FishingRecordType). The rule drops one row by ordinal regardless of *where* the empty row
+    /// sits, so it is correct only while the sheet has exactly one non-data row: a future patch that
+    /// adds a real row while keeping the sentinel would make this off by one (caught by the
+    /// `player_setup_size` 2952-byte assertion, but not by CI since the golden test is `#[ignore]`d).
     CountMinus1,
     /// `N = max(row.<field>) + 1` -- the elements are indexed by an in-row field.
     IndexField(&'static str),
@@ -90,7 +95,7 @@ struct Descriptor {
     expected: usize,
 }
 
-/// The 18 keys T1 owns. This is the ONLY set of keys the rewriter is allowed to touch.
+/// The 23 keys T1 owns. This is the ONLY set of keys the rewriter is allowed to touch.
 const DESCRIPTORS: &[Descriptor] = &[
     // -- Count + Div8 --------------------------------------------------------------------------
     d("TITLE_UNLOCK_BITMASK_SIZE", "Title", Rule::Count, Unit::Div8, 112),
@@ -105,8 +110,13 @@ const DESCRIPTORS: &[Descriptor] = &[
     d("ADVENTURE_BITMASK_SIZE", "Adventure", Rule::Count, Unit::Div8, 43),
     d("CHOCOBO_TAXI_STANDS_BITMASK_SIZE", "ChocoboTaxiStand", Rule::Count, Unit::Div8, 12),
     d("BUDDY_EQUIP_BITMASK_SIZE", "BuddyEquip", Rule::Count, Unit::Div8, 14),
+    d("VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE", "VVDNotebookContents", Rule::Count, Unit::Div8, 7),
+    d("SECRET_RECIPE_BOOK_BITMASK_SIZE", "SecretRecipeBook", Rule::Count, Unit::Div8, 14),
+    d("CONTENTS_NOTE_BITMASK_SIZE", "ContentsNote", Rule::Count, Unit::Div8, 13),
     // -- CountMinus1 + Raw ---------------------------------------------------------------------
     d("BEAST_TRIBE_ARRAY_SIZE", "BeastTribe", Rule::CountMinus1, Unit::Raw, 20),
+    d("SATISFACTION_NPC_ARRAY_SIZE", "SatisfactionNpc", Rule::CountMinus1, Unit::Raw, 12),
+    d("FISHING_RECORD_TYPE_ARRAY_SIZE", "FishingRecordType", Rule::CountMinus1, Unit::Raw, 44),
     // -- IndexField + Div8 ---------------------------------------------------------------------
     d("MOUNT_BITMASK_SIZE", "Mount", Rule::IndexField("Order"), Unit::Div8, 45),
     d("CUTSCENE_SEEN_BITMASK_SIZE", "CutsceneWorkIndex", Rule::IndexField("WorkIndex"), Unit::Div8, 183),
@@ -185,16 +195,21 @@ fn raw_count(
     use icarus::BuddyEquip::BuddyEquipSheet;
     use icarus::ChocoboTaxiStand::ChocoboTaxiStandSheet;
     use icarus::Companion::CompanionSheet;
+    use icarus::ContentsNote::ContentsNoteSheet;
     use icarus::CutsceneWorkIndex::CutsceneWorkIndexSheet;
     use icarus::FishParameter::FishParameterSheet;
+    use icarus::FishingRecordType::FishingRecordTypeSheet;
     use icarus::GlassesStyle::GlassesStyleSheet;
     use icarus::Leve::LeveSheet;
     use icarus::Mount::MountSheet;
     use icarus::Orchestrion::OrchestrionSheet;
     use icarus::Ornament::OrnamentSheet;
+    use icarus::SatisfactionNpc::SatisfactionNpcSheet;
+    use icarus::SecretRecipeBook::SecretRecipeBookSheet;
     use icarus::SpearfishingItem::SpearfishingItemSheet;
     use icarus::Title::TitleSheet;
     use icarus::TripleTriadCard::TripleTriadCardSheet;
+    use icarus::VVDNotebookContents::VVDNotebookContentsSheet;
 
     let sheet_lang = sheet_language(desc.sheet, lang);
 
@@ -236,8 +251,13 @@ fn raw_count(
         "Adventure" => count!(AdventureSheet),
         "ChocoboTaxiStand" => count!(ChocoboTaxiStandSheet),
         "BuddyEquip" => count!(BuddyEquipSheet),
+        "VVDNotebookContents" => count!(VVDNotebookContentsSheet),
+        "SecretRecipeBook" => count!(SecretRecipeBookSheet),
+        "ContentsNote" => count!(ContentsNoteSheet),
         // -- CountMinus1 + Raw -----------------------------------------------------------------
         "BeastTribe" => count!(BeastTribeSheet),
+        "SatisfactionNpc" => count!(SatisfactionNpcSheet),
+        "FishingRecordType" => count!(FishingRecordTypeSheet),
         // -- IndexField + Div8 -----------------------------------------------------------------
         "Mount" => {
             // `Order` is the mount's index into the bitmask; `i16`, never negative in practice.
@@ -751,12 +771,12 @@ mod tests {
     // -- Descriptor table sanity ---------------------------------------------------------------
 
     #[test]
-    fn descriptors_own_exactly_eighteen_unique_keys() {
-        assert_eq!(DESCRIPTORS.len(), 18);
+    fn descriptors_own_exactly_twenty_three_unique_keys() {
+        assert_eq!(DESCRIPTORS.len(), 23);
         let mut keys: Vec<&str> = DESCRIPTORS.iter().map(|d| d.key).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), 18, "owned keys must be unique");
+        assert_eq!(keys.len(), 23, "owned keys must be unique");
     }
 
     /// T1's keys must be present in the checked-in constants.yml and disjoint from the hardcoded
@@ -783,9 +803,13 @@ mod tests {
             "GUILDHEST_ARRAY_SIZE",
             "FRONTLINE_ARRAY_SIZE",
             "CRYSTALLINE_CONFLICT_ARRAY_SIZE",
+            "MAPS_WITH_UP_TO_16_REGIONS_ARRAY_SIZE",
+            "MAPS_WITH_UP_TO_32_REGIONS_ARRAY_SIZE",
             "MASKED_CARNIVALE_ARRAY_SIZE",
             "MISC_CONTENT_ARRAY_SIZE",
             "SPECIAL_CONTENT_ARRAY_SIZE",
+            "TRIPLE_TRIAD_NPC_BITMASK_SIZE",
+            "CONTENT_ROULETTE_ARRAY_SIZE",
         ];
 
         let input = std::fs::read_to_string(default_constants_path())
@@ -879,7 +903,7 @@ mod tests {
 
     // -- Golden test (real install; #[ignore]d) ------------------------------------------------
 
-    /// Pins all 18 computed values against the expected column. Requires a real FFXIV install; run
+    /// Pins all 23 computed values against the expected column. Requires a real FFXIV install; run
     /// with `cargo test -p kawari-constants-gen -- --include-ignored`.
     /// `cargo test` runs with the crate directory as cwd, but `get_config` resolves `config.yaml`
     /// relative to the repository root. Match the world server (and actionaudit) by entering it.
@@ -895,7 +919,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a real FFXIV install (set filesystem.game_path); run with --include-ignored"]
-    fn golden_all_eighteen_values_match_expected() {
+    fn golden_all_twenty_three_values_match_expected() {
         use kawari::config::get_config;
 
         goto_repo_root();
