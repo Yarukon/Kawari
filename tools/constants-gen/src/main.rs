@@ -806,6 +806,8 @@ mod tests {
             "MASKED_CARNIVALE_ARRAY_SIZE",
             "MISC_CONTENT_ARRAY_SIZE",
             "SPECIAL_CONTENT_ARRAY_SIZE",
+            "TRIPLE_TRIAD_NPC_BITMASK_SIZE",
+            "CONTENT_ROULETTE_ARRAY_SIZE",
         ];
 
         let input = std::fs::read_to_string(default_constants_path())

@@ -10,14 +10,16 @@ use crate::{
         AETHER_CURRENT_COMP_FLG_SET_BITMASK_SIZE, AETHERYTE_UNLOCK_BITMASK_SIZE,
         BEAST_TRIBE_ARRAY_SIZE, BEGINNER_TRAINING_ARRAY_SIZE, BUDDY_EQUIP_BITMASK_SIZE,
         CAUGHT_FISH_BITMASK_SIZE, CAUGHT_SPEARFISH_BITMASK_SIZE, CHOCOBO_TAXI_STANDS_BITMASK_SIZE,
-        CLASSJOB_ARRAY_SIZE, CONTENTS_NOTE_BITMASK_SIZE, CRYSTALLINE_CONFLICT_ARRAY_SIZE,
+        CLASSJOB_ARRAY_SIZE, CONTENT_ROULETTE_ARRAY_SIZE, CONTENTS_NOTE_BITMASK_SIZE,
+        CRYSTALLINE_CONFLICT_ARRAY_SIZE,
         CUTSCENE_SEEN_BITMASK_SIZE, DUNGEON_ARRAY_SIZE, FISHING_RECORD_TYPE_ARRAY_SIZE,
         FRAMERS_KIT_BITMASK_SIZE, FRONTLINE_ARRAY_SIZE, GLASSES_STYLES_BITMASK_SIZE,
         GUILDHEST_ARRAY_SIZE, MASKED_CARNIVALE_ARRAY_SIZE, MINION_BITMASK_SIZE,
         MISC_CONTENT_ARRAY_SIZE, MOUNT_BITMASK_SIZE, ORCHESTRION_ROLL_BITMASK_SIZE,
         ORNAMENT_BITMASK_SIZE, RAID_ARRAY_SIZE, SATISFACTION_NPC_ARRAY_SIZE,
         SECRET_RECIPE_BOOK_BITMASK_SIZE, SPECIAL_CONTENT_ARRAY_SIZE, TRIAL_ARRAY_SIZE,
-        TRIPLE_TRIAD_CARDS_BITMASK_SIZE, UNLOCK_BITMASK_SIZE, UNLOCKED_FISHING_SPOTS_BITMASK_SIZE,
+        TRIPLE_TRIAD_CARDS_BITMASK_SIZE, TRIPLE_TRIAD_NPC_BITMASK_SIZE, UNLOCK_BITMASK_SIZE,
+        UNLOCKED_FISHING_SPOTS_BITMASK_SIZE,
         VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE,
     },
 };
@@ -323,15 +325,12 @@ pub struct PlayerSetup {
     /// joined one GC). (0x88D..0x8A0 is the beast-tribe rank array, all 0x08 = max rank 8.)
     pub gc_ranks: [u8; 3],
     pub beast_reputation_rank: [u8; BEAST_TRIBE_ARRAY_SIZE],
-    // TODO Is this needed auto ARRAY_SIZE too?
-    /// 0x8A1..0x8AA -> PlayerState+0x520..0x529 = _contentRouletteCompletion bit 0-9
-    /// (10 bytes). Verified by InstanceContent.IsRouletteIncomplete (0x140C2A5CF): reads
+    /// 0x8A1..0x8AC -> PlayerState+0x520..0x52B = _contentRouletteCompletion bitmap
+    /// (12 bytes). Read by InstanceContent.IsRouletteIncomplete (0x140C2A5CF): reads
     /// byte_142AAEE58[ContentRoulette-row+71], index 0..11 -> the full bitmap is 12 bytes.
-    pub content_roulette_completion: [u8; 10],
-    // TODO Merge this with content_roulette_completion, they are unite
-    /// 0x8AB..0x8AC -> PlayerState+0x52A..0x52B = _contentRouletteCompletion bit 10-11
-    /// (extension of content_roulette_completion, same IsRouletteIncomplete bitmap).
-    pub unknown_after_roulette: [u8; 2],
+    /// NOTE: CONTENT_ROULETTE_ARRAY_SIZE (T2) is extracted from the sibling ContentRoulette.CanGetAwards
+    /// (strict `< 0xC`), not this reader (whose guard is an inclusive `<= 0xB` that would yield 11).
+    pub content_roulette_completion: [u8; CONTENT_ROULETTE_ARRAY_SIZE],
     /// Persistent CPose selections, one index per PoseType category:
     /// 0=Idle, 1=WeaponDrawn, 2=Sit, 3=GroundSit, 4=Doze, 5=Umbrella, 6=Accessory, 7=reserved.
     /// The client stores these in `PlayerState.SelectedPoses` and re-applies the matching one
@@ -359,15 +358,14 @@ pub struct PlayerSetup {
     #[br(count = TRIPLE_TRIAD_CARDS_BITMASK_SIZE)]
     #[bw(pad_size_to = TRIPLE_TRIAD_CARDS_BITMASK_SIZE)]
     pub triple_triad_cards: Vec<u8>,
-    // TODO Need to add auto BITMASK_SIZE for this
     /// 0x9DE..0x9EE (17 bytes = 136 bits) -> UIState+0x1A1E8 = 0x142AC80E8, Triple Triad
     /// NPC-beaten bitmap. Checked by UIState.IsTripleTriadNpcBeaten (0x140C49710): for
     /// NPC ids 2293762..2293873 (0x230002..0x230091), tests bit (row+71-derived index)
     /// in this 17-byte bitmap (v4>>3 < 0x11). Adjacent to UnlockedTripleTriadCardsCount
     /// (0x142AC80E0). Retail: 12 DA 3B 59 21 0D E2 00 00 00 00 00 00 08 00 00 00 =
     /// which TT NPCs the player has beaten.
-    #[br(count = 17)]
-    #[bw(pad_size_to = 17)]
+    #[br(count = TRIPLE_TRIAD_NPC_BITMASK_SIZE)]
+    #[bw(pad_size_to = TRIPLE_TRIAD_NPC_BITMASK_SIZE)]
     pub triple_triad_npc_beaten: Vec<u8>,
     // We do -1 because of aether_current_comp_flg_set_bitmask1 being present way earlier.
     #[br(count = AETHER_CURRENT_COMP_FLG_SET_BITMASK_SIZE - 1)]

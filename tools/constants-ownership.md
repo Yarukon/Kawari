@@ -52,7 +52,7 @@ Rules: `Count` = max_row_id+1. `CountMinus1` = max_row_id (drops the empty row-0
 sentinels). `PopulatedRowIdPlus1` = max(row_id where the row is populated) + 1 (drops the trailing
 all-zero row). Unit: `Div8` = ceil(N/8), `Raw` = N.
 
-## T2 — extract_client_constants.py (7 keys)
+## T2 — extract_client_constants.py (9 keys)
 
 Client-fixed sizes with a clean inline bound in an `IsXxxUnlocked`-family guard. The IDA tool matches
 a byte pattern per function (symbol-independent, so it runs on int OR CN builds), reads the bound
@@ -70,6 +70,8 @@ index>>3), `byte_masked` = K/8 (guard tests index & ~7).
 | FRAMERS_KIT_BITMASK_SIZE | PlayerState.IsFramersKitUnlocked | bit |
 | UNLOCK_BITMASK_SIZE | UIState.SetUnlockLinkValue (setter) | byte_masked |
 | ACTIVE_HELP_BITMASK_SIZE | UIState.AnnounceHowTo (announce) | byte_masked |
+| TRIPLE_TRIAD_NPC_BITMASK_SIZE | UIState.IsTripleTriadNpcBeaten | byte |
+| CONTENT_ROULETTE_ARRAY_SIZE | ContentRoulette.CanGetAwards | byte |
 
 Note: these sizes drive both the wire layout (`#[br(count)]`/`#[bw(pad_size_to)]` in the zone server
 IPC) and the DB bitmask width (`Bitmask<N>`/`QuestBitmask<N>` in `servers/world/src/database/models.rs`

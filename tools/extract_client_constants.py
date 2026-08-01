@@ -80,6 +80,14 @@ BASELINE_TARGETS = [
      "8B C2 83 E0 F8 3D ?? ?? ?? ?? 73 ?? 44 8B CA 49 C1 E9 03", 6, 4, "byte_masked", 92),
     ("ACTIVE_HELP_BITMASK_SIZE", "UIState.AnnounceHowTo", 0xC4994A,
      "8B D3 83 E2 F8 81 FA ?? ?? ?? ?? 73", 7, 4, "byte_masked", 38),
+    ("TRIPLE_TRIAD_NPC_BITMASK_SIZE", "UIState.IsTripleTriadNpcBeaten", 0xC49710,
+     "8B C8 C1 E8 03 83 F8 ?? 73 ?? 83 E1 07 BA 01 00 00 00 D3 E2", 7, 1, "byte", 17),
+    # CONTENT_ROULETTE_ARRAY_SIZE is a plain 12-entry byte array (one byte per roulette entry),
+    # NOT a bitmask. We anchor on ContentRoulette.CanGetAwards, whose guard is a strict `< 0xC`
+    # (K=12) over the same byte_142AAEE58 array; here `unit=byte` means "direct array length"
+    # (returns K unchanged), which is numerically correct even though there is no >>3 shift.
+    ("CONTENT_ROULETTE_ARRAY_SIZE", "ContentRoulette.CanGetAwards", 0xC24490,
+     "80 78 47 0C 7D ?? 0F B6 4B 08", 3, 1, "byte", 12),
 ]
 
 # --------------------------------------------------------------------------
