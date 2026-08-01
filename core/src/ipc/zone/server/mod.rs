@@ -912,7 +912,6 @@ pub enum ServerZoneIpcData {
         bitmask: Vec<u8>,
     },
     GatheringLog {
-        #[brw(pad_after = 2)] // unaccounted for in the CS size
         #[br(count = GATHERED_GATHERING_ITEMS_BITMASK_SIZE)]
         #[bw(pad_size_to = GATHERED_GATHERING_ITEMS_BITMASK_SIZE)]
         bitmask: Vec<u8>,
@@ -1087,6 +1086,7 @@ pub enum ServerZoneIpcData {
         layout_id: u32,
     },
     LegacyQuestList {
+        #[brw(pad_after = 1)] // unaccounted for in the CS size
         #[br(count = COMPLETED_LEGACY_QUEST_BITMASK_SIZE)]
         #[bw(pad_size_to = COMPLETED_LEGACY_QUEST_BITMASK_SIZE)]
         bitmask: Vec<u8>,
