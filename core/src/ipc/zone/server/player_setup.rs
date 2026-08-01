@@ -10,13 +10,15 @@ use crate::{
         AETHER_CURRENT_COMP_FLG_SET_BITMASK_SIZE, AETHERYTE_UNLOCK_BITMASK_SIZE,
         BEAST_TRIBE_ARRAY_SIZE, BEGINNER_TRAINING_ARRAY_SIZE, BUDDY_EQUIP_BITMASK_SIZE,
         CAUGHT_FISH_BITMASK_SIZE, CAUGHT_SPEARFISH_BITMASK_SIZE, CHOCOBO_TAXI_STANDS_BITMASK_SIZE,
-        CLASSJOB_ARRAY_SIZE, CRYSTALLINE_CONFLICT_ARRAY_SIZE, CUTSCENE_SEEN_BITMASK_SIZE,
-        DUNGEON_ARRAY_SIZE, FRAMERS_KIT_BITMASK_SIZE, FRONTLINE_ARRAY_SIZE,
-        GLASSES_STYLES_BITMASK_SIZE, GUILDHEST_ARRAY_SIZE, MASKED_CARNIVALE_ARRAY_SIZE,
-        MINION_BITMASK_SIZE, MISC_CONTENT_ARRAY_SIZE, MOUNT_BITMASK_SIZE,
-        ORCHESTRION_ROLL_BITMASK_SIZE, ORNAMENT_BITMASK_SIZE, RAID_ARRAY_SIZE,
-        SPECIAL_CONTENT_ARRAY_SIZE, TRIAL_ARRAY_SIZE, TRIPLE_TRIAD_CARDS_BITMASK_SIZE,
-        UNLOCK_BITMASK_SIZE, UNLOCKED_FISHING_SPOTS_BITMASK_SIZE,
+        CLASSJOB_ARRAY_SIZE, CONTENTS_NOTE_BITMASK_SIZE, CRYSTALLINE_CONFLICT_ARRAY_SIZE,
+        CUTSCENE_SEEN_BITMASK_SIZE, DUNGEON_ARRAY_SIZE, FISHING_RECORD_TYPE_ARRAY_SIZE,
+        FRAMERS_KIT_BITMASK_SIZE, FRONTLINE_ARRAY_SIZE, GLASSES_STYLES_BITMASK_SIZE,
+        GUILDHEST_ARRAY_SIZE, MASKED_CARNIVALE_ARRAY_SIZE, MINION_BITMASK_SIZE,
+        MISC_CONTENT_ARRAY_SIZE, MOUNT_BITMASK_SIZE, ORCHESTRION_ROLL_BITMASK_SIZE,
+        ORNAMENT_BITMASK_SIZE, RAID_ARRAY_SIZE, SATISFACTION_NPC_ARRAY_SIZE,
+        SECRET_RECIPE_BOOK_BITMASK_SIZE, SPECIAL_CONTENT_ARRAY_SIZE, TRIAL_ARRAY_SIZE,
+        TRIPLE_TRIAD_CARDS_BITMASK_SIZE, UNLOCK_BITMASK_SIZE, UNLOCKED_FISHING_SPOTS_BITMASK_SIZE,
+        VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE,
     },
 };
 
@@ -36,7 +38,7 @@ pub struct PlayerSetup {
     /// iterations (%1000 / %100) to select the randomized journal/supply entries.
     /// NOT "GCSupply stuff" - that FFXIVClientStructs comment is stale (0x2F0 is DoH/DoL
     /// levels, 0x2FC is this seed).
-    pub unknown1c: u32,
+    pub quest_journal_prng_seed: u32,
     pub fish_caught: u32,
     pub use_bait_catalog_id: u32,
     pub num_spearfish_caught: u32,
@@ -189,13 +191,13 @@ pub struct PlayerSetup {
     /// 火山龟373/62.7, 噬卵者1113/233.3 (ilms) + 6 spearfishing records.
     /// NOTE: values are FishParameter/SpearfishingItem row ids, NOT Item row ids -
     /// earlier identification as "Deprecated gear" was a numeric coincidence.
-    #[br(count = 44)]
-    #[bw(pad_size_to = 44 * 2)]
+    #[br(count = FISHING_RECORD_TYPE_ARRAY_SIZE)]
+    #[bw(pad_size_to = FISHING_RECORD_TYPE_ARRAY_SIZE * 2)]
     pub fishing_record_best_fish: Vec<u16>,
     /// 44 x matching best-catch max size (ilms x 10, PlayerState+0x39C, packet 0x222..0x279).
     /// Same index as fishing_record_best_fish (e.g. 旋齿鲨 183.9 ilms = 1839).
-    #[br(count = 44)]
-    #[bw(pad_size_to = 44 * 2)]
+    #[br(count = FISHING_RECORD_TYPE_ARRAY_SIZE)]
+    #[bw(pad_size_to = FISHING_RECORD_TYPE_ARRAY_SIZE * 2)]
     pub fishing_record_best_size: Vec<u16>,
     /// 0x27A..0x2B1. Mixed: 0x28C..0x2AA = QuestManager beast-tribe data; 0x2AC..0x2B1 =
     /// Frontline weekly places (3 u16 -> PvPProfile+0x46/0x48/0x4A FrontlineWeeklyFirst/
@@ -204,8 +206,10 @@ pub struct PlayerSetup {
     #[bw(pad_size_to = 56)]
     pub unknown_after_194: Vec<u8>,
     /// 0x2B2..0x2C9 (12 u16) = SatisfactionSupplyManager._satisfaction (current-rank satisfaction
-    /// points per satisfaction NPC). All 0 in retail capture. Not read by PlayerState.ReadPacket.
-    pub supply_satisfcation: [u16; 12],
+    /// points per satisfaction NPC, one u16 per SatisfactionNpc). Not read by PlayerState.ReadPacket.
+    /// Retail capture: 11x 0 + 1x 240 (the 12th/7.51 NPC had progress), confirming the [u16;12]
+    /// boundary is correct — companion_name (0x2CA) parses right after it, byte-identical round-trip.
+    pub supply_satisfcation: [u16; SATISFACTION_NPC_ARRAY_SIZE],
     #[br(count = 21)]
     #[bw(pad_size_to = 21)]
     #[br(map = read_string)]
@@ -284,13 +288,13 @@ pub struct PlayerSetup {
     pub companion_equipped_body: u8,
     pub companion_equipped_legs: u8,
     /// 0x762..0x765 (4 bytes) -> PlayerState+0x2EC..0x2EF (UIState+0xD24). Grand Company
-    /// Supply "submitted this week" flag bitmap (55 bits): sub_140C1B4A0 tests
+    /// Supply/Provisioning "submitted this week" flag bitmap (55 bits): sub_140C1B4A0 tests
     /// (128>>(v4&7)) & byte_142AAEC24[v4>>3] for v4=0..54. Bit i = entry (i+1), 0-based.
     /// Order matches doh_dol_levels: bit 0-7 = crafters (CRP, BSM, ARM, GSM, LTW, WVR,
     /// ALC, CUL), bit 8 = Miner, bit 9 = Botanist, bit 10 = Fisher. VERIFIED live:
     /// submitting Miner GC-supply set bit 8 (00 00 00 00 -> 00 80 00 00); completing
     /// Custom Delivery (satisfaction) did NOT change it (separate system).
-    pub unknown_after_buddy: [u8; 4],
+    pub gc_supply_submitted_flags: [u8; 4],
     /// 0x766..0x770 (11 bytes) -> PlayerState+0x2F0..0x2FA (UIState+0xD28) = DoH/DoL
     /// (crafter/gatherer) job levels, one byte per job. Retail capture:
     /// 10x 100 + 90 (Fisher lv90 last) - user-confirmed. Read by quest-journal logic
@@ -337,10 +341,9 @@ pub struct PlayerSetup {
     pub player_state_flags2: PlayerStateFlags2,
     pub player_state_flags3: PlayerStateFlags3,
 
-    // TODO there's no padding_after_content, is unite with contents_note_completion_flags, need auto BITMASK_SIZE for contents_note_completion_flags and unlocked_secret_recipe_books
-    pub contents_note_completion_flags: [u8; 8],
-    pub padding_after_content: [u8; 5],
-    pub unlocked_secret_recipe_books: [u8; 14],
+    /// ContentsNote completion bitmap (104 bits = 13 bytes), one bit per ContentsNote entry.
+    pub contents_note: [u8; CONTENTS_NOTE_BITMASK_SIZE],
+    pub unlocked_secret_recipe_books: [u8; SECRET_RECIPE_BOOK_BITMASK_SIZE],
     // TODO Figure out what client should do to trigger reading from this region bruh
     #[br(count = 28)]
     #[bw(pad_size_to = 28)]
@@ -403,12 +406,11 @@ pub struct PlayerSetup {
     pub weekly_bingo_order_data: [u8; 16],
     pub weekly_bingo_reward_data: [u8; 4],
 
-    // TODO Need to implement ARRAY_SIZE
     /// 0xAC3..0xACE (12 u8) = SatisfactionSupplyManager._satisfactionRanks (per-NPC satisfaction
-    /// rank 1-5, the hearts in the UI). Retail capture: 11x 5 + 1x 0 = 11 maxed (5) + the
-    /// 12th NPC added in 7.51 with rank 0 (not yet delivered to).
-    pub supply_satisfaction_ranks: [u8; 12],
-    pub used_supply_allowances: [u8; 12],
+    /// rank 1-5, the hearts in the UI). Retail capture: latest = 11x 5 + 1x 2 (the 12th/7.51 NPC
+    /// reached rank 2 since the earlier all-0 capture).
+    pub supply_satisfaction_ranks: [u8; SATISFACTION_NPC_ARRAY_SIZE],
+    pub used_supply_allowances: [u8; SATISFACTION_NPC_ARRAY_SIZE],
 
     /// 0xADB (1 byte, value 0x1F in retail) -> PlayerState+0x697 = _unlockedSpecialContent
     /// (UIState+0x10CF). Bitmap of unlocked special contents; checked by
@@ -475,9 +477,8 @@ pub struct PlayerSetup {
     #[bw(pad_size_to = MASKED_CARNIVALE_ARRAY_SIZE)]
     pub cleared_masked_carnivale: Vec<u8>,
 
-    // TODO Need to figure out is this needed auto BITMASK_SIZE too?
     /// 0xB76..0xB7C (7 bytes) -> PlayerState+0x690..0x696 = _completedVVDNotebookContents.
-    pub completed_vvd_notebook_contents: [u8; 7],
+    pub completed_vvd_notebook_contents: [u8; VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE],
 
     #[br(count = MISC_CONTENT_ARRAY_SIZE)]
     #[bw(pad_size_to = MISC_CONTENT_ARRAY_SIZE)]
@@ -533,7 +534,7 @@ mod tests {
         ps.doh_dol_levels = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
         ps.gc_ranks = [0x11, 0x22, 0x33];
         ps.selected_poses = [1, 2, 3, 4, 5, 6, 7, 0];
-        ps.supply_satisfaction_ranks = [5; 12]; // tail
+        ps.supply_satisfaction_ranks = [5; SATISFACTION_NPC_ARRAY_SIZE]; // tail
         ps.unlocked_special_content = vec![0x1F];
         ps.cleared_masked_carnivale = vec![0x03, 0, 0, 0];
 

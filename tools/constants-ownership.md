@@ -15,10 +15,10 @@ Every key in `resources/data/constants.yml` is owned by exactly one of:
   respective tooling, not by the size generators.
 
 The partition is asserted in code: `owned_keys_present_and_disjoint_from_client_fixed`
-(`tools/constants-gen/src/main.rs`) checks that all 18 T1 keys are present in `constants.yml` and
+(`tools/constants-gen/src/main.rs`) checks that all 23 T1 keys are present in `constants.yml` and
 disjoint from the client-fixed set (the T2 + D keys). T1 ∩ (T2 ∪ D) = ∅.
 
-## T1 — kawari-constants-gen (18 keys)
+## T1 — kawari-constants-gen (23 keys)
 
 | key | sheet | rule | unit |
 |---|---|---|---|
@@ -34,7 +34,12 @@ disjoint from the client-fixed set (the T2 + D keys). T1 ∩ (T2 ∪ D) = ∅.
 | ADVENTURE_BITMASK_SIZE | Adventure | Count | Div8 |
 | CHOCOBO_TAXI_STANDS_BITMASK_SIZE | ChocoboTaxiStand | Count | Div8 |
 | BUDDY_EQUIP_BITMASK_SIZE | BuddyEquip | Count | Div8 |
+| VVD_NOTEBOOK_CONTENTS_BITMASK_SIZE | VVDNotebookContents | Count | Div8 |
+| SECRET_RECIPE_BOOK_BITMASK_SIZE | SecretRecipeBook | Count | Div8 |
+| CONTENTS_NOTE_BITMASK_SIZE | ContentsNote | Count | Div8 |
 | BEAST_TRIBE_ARRAY_SIZE | BeastTribe | CountMinus1 | Raw |
+| SATISFACTION_NPC_ARRAY_SIZE | SatisfactionNpc | CountMinus1 | Raw |
+| FISHING_RECORD_TYPE_ARRAY_SIZE | FishingRecordType | CountMinus1 | Raw |
 | MOUNT_BITMASK_SIZE | Mount | IndexField(Order) | Div8 |
 | CUTSCENE_SEEN_BITMASK_SIZE | CutsceneWorkIndex | IndexField(WorkIndex) | Div8 |
 | CAUGHT_FISH_BITMASK_SIZE | FishParameter | IndexRowIdWhere(IsInLog) | Div8 |
