@@ -59,10 +59,19 @@ pub struct PlayerSetup {
     pub tofu_timestamp: u32,
     /// 0x5C..0x5D
     pub unknown_after_tofu: [u8; 2],
-    /// 0x5E..0x65 - 4 x u16 -> PvPProfile+0x16..0x1C (unnamed area 0x14-0x23 between GC
-    /// ranks and Series). All 0 in retail; no real reader found (searched PvP* code -
-    /// 0x16/0x18/0x1A/0x1C hits are other structs' offsets). Likely reserved/dead.
-    pub pvp_unknowns: [u16; 4],
+    /// 0x5E (u16) -> PvPProfile+0x16 = lifetime PvP total matches (all modes, not weekly-reset).
+    /// User-confirmed against the achievement 狱中古狼 (total PvP matches); retail capture 1606.
+    pub pvp_total_matches: u16,
+    /// 0x60 (u16) -> PvPProfile+0x18 = lifetime PvP total wins (all modes, not weekly-reset).
+    /// User-confirmed against the achievement 凶狼狂啸 (PvP victories); retail capture 835.
+    pub pvp_total_wins: u16,
+    /// 0x62 (u16) -> PvPProfile+0x1A = weekly PvP matches. Zeroed on weekly reset (ActorControl
+    /// cat 852 sub 3). Inferred from the reset semantics + Sapphire PvPWeeklyMatchCount; retail 39.
+    /// (Weekly split not independently achievement-confirmed.)
+    pub pvp_weekly_matches: u16,
+    /// 0x64 (u16) -> PvPProfile+0x1C = weekly PvP wins. Zeroed on weekly reset. Inferred from the
+    /// reset semantics + Sapphire PvPWeeklyWinCount; retail 22. (Not achievement-confirmed.)
+    pub pvp_weekly_wins: u16,
     /// 0x66..0x67 -> PvPProfile+0x28 = SeriesExperience. Retail: 0.
     pub pvp_series_exp: u16,
     /// How many player commendations you received.
@@ -71,11 +80,11 @@ pub struct PlayerSetup {
     /// (sub_140BDD9F0: sets a bit in PlayerState+0x18C per ClassJob).
     pub unknown64: [u16; 2],
     pub frontline_weekly_matches: u16,
-    /// 0x70 (u16 = 0xC000) = AnimaWeapon object +12 field: low 14 bits = enhance points
-    /// (& 0x3FFF, 0 here), bit 0x4000 = have 改良型元灵透镜 (Improved Anima Lens,
-    /// EventItem 2002029, quest 67932 - "人造元灵终绽放" stage, user-confirmed).
-    /// Written by sub_1408931D0, read by GetAnimaWeapon7EnhancePoint.
-    pub unknown2: u16,
+    /// 0x70 (u16) -> g_AnimaWeaponsState+0xC (0x142AA8CB0+0xC) = Anima Weapon (3.x relic)
+    /// enhancement stage: low 14 bits (& 0x3FFF) = enhancement points; bit 0x4000 = have
+    /// 改良型元灵透镜 (Improved Anima Lens, EventItem 2002029, quest 67932 stage - user-confirmed).
+    /// Written by sub_1408931D0, read by LuaPc.GetAnimaWeapon7EnhancePoint (reads +0xC).
+    pub anima_weapon_enhancement: u16,
     pub active_gc_army_expedition: u16,
     pub active_gc_army_training: u16,
     pub unknown2a: u16,
@@ -344,10 +353,17 @@ pub struct PlayerSetup {
     /// ContentsNote completion bitmap (104 bits = 13 bytes), one bit per ContentsNote entry.
     pub contents_note: [u8; CONTENTS_NOTE_BITMASK_SIZE],
     pub unlocked_secret_recipe_books: [u8; SECRET_RECIPE_BOOK_BITMASK_SIZE],
-    // TODO Figure out what client should do to trigger reading from this region bruh
+    /// wire 0x8D3..0x8EE (28 bytes) -> PlayerState+0x547 = guildhest first-clear completion matrix:
+    /// 14 guildhests x 14 combat base-classes, laid out as 14 u16 rows (row = GuildOrder index a1-1,
+    /// 0..13; bit = base-class ordinal 0..13). Jobs fold to their parent ClassJob before indexing
+    /// (e.g. Summoner -> Arcanist), so all base classes fit the 16-bit stride. Written via ActorControl
+    /// category 149 (arg1 = guildhest 1..14, arg2 = ClassJobId, arg3 = set/clear) and read by the Duty
+    /// Finder reward preview (AgentContentsFinderInterface): a set bit means that base class already
+    /// cleared that guildhest, suppressing the first-clear bonus. Getter sub_1419B0460 / setter
+    /// sub_1419B0390 over PlayerState+0x547 (== byte_142AAEE7F).
     #[br(count = 28)]
     #[bw(pad_size_to = 28)]
-    pub unknown879: Vec<u8>,
+    pub guildhest_completion: Vec<u8>,
     pub relic_monster_progress: [u8; 10],
     pub objective_progress: [u8; 2],
     #[br(count = ADVENTURE_BITMASK_SIZE)]
@@ -385,22 +401,19 @@ pub struct PlayerSetup {
     #[bw(pad_size_to = BEGINNER_TRAINING_ARRAY_SIZE)]
     pub completed_beginner_training: Vec<u8>, // 0xAA0->0x688 _completedBeginnerTraining
 
-    // TODO Figure out how the heck client is reading this
-    /// 0xAA4..0xAA7 -> PlayerState+0x68C..0x68F = _completedMaskedCarnivale (32-bit bitmap of
-    /// 0xAA4..0xAAE (11 bytes) -> bit-compressed into global AnimaWeapon object
-    /// (unk_142AA8CB0) by sub_140892AD0: each byte & 0x7F (7-bit value), bit7 = flag.
-    /// a2[8] bit7 -> EventItemManager 98 + EventItem 2001993 (乌兰的笔记 - trade token used
-    /// to exchange for anima weapon enhancement items); a2[9] bit7 -> EventItemManager 97 +
-    /// EventItem 2001994 (元灵透镜/Anima Lens);
-    /// a1[11] = a2[7]>>7. Referenced by LuaPc.SaveAnimaWeapon5EventItems /
-    /// GetAnimaWeapon7EnhancePoint / IsEquipAnimaWeapon and HandleActorControlPacket.
-    /// 11 bytes = the 11 jobs of the original 3.x Anima/Soul Weapon system (3.15),
-    /// NOT the 13 jobs of the later 5.x AnimaWeapon5 upgrade (AnimaWeapon5 sheet has 13 rows).
-    /// VERIFIED: player has Summoner anima weapon in progress ("人造元灵终绽放") ->
-    /// retail byte[8] = 0x80 (bit7=1, 7-bit value 0 = no enhancement points), so SMN is
-    /// the 9th slot in that 11-job ordering.
-    /// NOT a PlayerState field (earlier "masked carnivale" id was wrong - that is at 0xB72).
-    pub unk_completion2: [u8; 11],
+    /// 0xAA4..0xAAE (11 bytes) -> g_AnimaWeaponsState[0..11] (0x142AA8CB0) via sub_140892AD0.
+    /// Anima Weapon (3.x relic) SUBSTAT-TUNING state ("培育人造元灵" / Cultivating the Anima,
+    /// quest 2328) - NOT per-job data (the earlier "11 jobs" reading was a coincidence of length).
+    /// Each byte & 0x7F is a 7-bit value:
+    ///   [0..4]  = 5 substat allocation points (weapon slot A)
+    ///   [5..9]  = 5 substat allocation points (weapon slot B / realloc buffer)
+    ///   [10]    = committed SecondaryStatTotal base (full byte, feeds the 180-point cap)
+    ///   [11]    = src[7]>>7 = tuning-stage flag
+    /// sum([0..9]) >= 180 with [11] set = fully tuned (sub_140893050). High bits also gate
+    /// EventItems: src[8].bit7 -> item 98 / EventItem 2001993 (乌兰的笔记); src[9].bit7 -> item 97 /
+    /// EventItem 2001994 (元灵透镜/Anima Lens). Consumed by LuaPc.SaveAnimaWeapon5EventItems /
+    /// GetAnimaWeapon7EnhancePoint / IsEquipAnimaWeapon.
+    pub anima_weapon_substat_allocation: [u8; 11],
 
     pub weekly_bingo_order_data: [u8; 16],
     pub weekly_bingo_reward_data: [u8; 4],
