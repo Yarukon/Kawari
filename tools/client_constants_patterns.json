@@ -31,16 +31,6 @@
       "expect": 104
     },
     {
-      "key": "COMPLETED_LEGACY_QUEST_BITMASK_SIZE",
-      "fn": "QuestManager.IsLegacyQuestComplete",
-      "baseline_rva": "0xdf7b70",
-      "pattern": "0F B7 C2 4C 8B C9 44 8B C0 49 C1 E8 03 49 83 F8 ?? 73",
-      "imm_offset": 16,
-      "imm_size": 1,
-      "unit": "byte",
-      "expect": 39
-    },
-    {
       "key": "COMPLETED_QUEST_BITMASK_SIZE",
       "fn": "QuestManager.IsQuestComplete1",
       "baseline_rva": "0xdf6280",

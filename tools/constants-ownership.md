@@ -47,7 +47,7 @@ Rules: `Count` = max_row_id+1. `CountMinus1` = max_row_id (drops the empty row-0
 sentinels). `PopulatedRowIdPlus1` = max(row_id where the row is populated) + 1 (drops the trailing
 all-zero row). Unit: `Div8` = ceil(N/8), `Raw` = N.
 
-## T2 — extract_client_constants.py (8 keys)
+## T2 — extract_client_constants.py (7 keys)
 
 Client-fixed sizes with a clean inline bound in an `IsXxxUnlocked`-family guard. The IDA tool matches
 a byte pattern per function (symbol-independent, so it runs on int OR CN builds), reads the bound
@@ -62,7 +62,6 @@ index>>3), `byte_masked` = K/8 (guard tests index & ~7).
 | COMPLETED_RECIPES_BITMASK_SIZE | QuestManager.IsRecipeComplete | byte |
 | UNLOCKED_MAP_MARKERS_BITMASK_SIZE | QuestManager.IsMapMarkerUnlocked | byte |
 | GATHERED_GATHERING_ITEMS_BITMASK_SIZE | QuestManager.IsGatheringItemGathered | byte |
-| COMPLETED_LEGACY_QUEST_BITMASK_SIZE | QuestManager.IsLegacyQuestComplete | byte |
 | FRAMERS_KIT_BITMASK_SIZE | PlayerState.IsFramersKitUnlocked | bit |
 | UNLOCK_BITMASK_SIZE | UIState.SetUnlockLinkValue (setter) | byte_masked |
 | ACTIVE_HELP_BITMASK_SIZE | UIState.AnnounceHowTo (announce) | byte_masked |
@@ -75,9 +74,14 @@ saved column width — intended.
 ## D — manual client-fixed (NOT auto-generated)
 
 Fixed by the client with no inline bound the IDA tool can key off (no bitmask / global byte arrays via
-a shared `IsUnlockBitSet` helper / content arrays indexed by id−offset with fixed slack). Maintained
-by hand.
+a shared `IsUnlockBitSet` helper / content arrays indexed by id−offset with fixed slack), OR a client
+bound that is real but backs frozen/discontinued content, so auto-extraction is pure liability.
+Maintained by hand.
 
+- COMPLETED_LEGACY_QUEST_BITMASK_SIZE (=39) — FFXIV 1.x quest completion flags. The client's
+  `IsLegacyQuestComplete` bound (39 bytes = 312 bits) is a permanent historical cap: 1.0 content is
+  discontinued and complete, so it never grows. Pinned manually instead of kept as a T2 pattern that
+  could fail-fast the whole tool for a dead constant. (Value originally extracted via `(a2>>3)<0x27`.)
 - UNLOCKED_FISHING_SPOTS_BITMASK_SIZE
 - CLASSJOB_ARRAY_SIZE
 - AVAILABLE_CLASSJOBS
