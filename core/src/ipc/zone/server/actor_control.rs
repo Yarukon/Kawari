@@ -595,8 +595,10 @@ pub enum ActorControlCategory {
         pet_id: u32,
         /// The object ID of the pet.
         pet_actor_id: ObjectId,
-        unk2: u32,
-        unk3: u32,
+        /// Client checks non-zero only: if non-zero, clears the pet slot (teardown).
+        dismiss: u32,
+        /// Which pet storage slot: 0 = chocobo-buddy slot, 1 = summon (carbuncle/egi) slot, 2+ unknown.
+        storage_target: u32,
     },
 
     /// Sets up "pets" like carbuncles.
@@ -604,12 +606,39 @@ pub enum ActorControlCategory {
     SetPetParameters {
         /// Index into the Pet Excel sheet. If set to 0, hides the pet hotbar.
         pet_id: u32,
-        unk2: u32,
-        unk3: u32,
-        /// Usually 7?
-        unk4: u32,
+        /// PetAction stance; values ~2/3/4 (maps to Pet action ids 2/3/4).
+        pet_stance: u32,
+        /// Client toggles between 5 and 6.
+        pet_guard_mode: u32,
+        /// Ideally toggles 7/8, but those Pet actions are deprecated so in practice fixed at 7.
+        pet_auto_mode: u32,
         /// Retail toggles this to 1 while the pet owner is mounted, then back to 0 after dismount.
         mount_state: u32,
+    },
+
+    /// Fades the pet OUT (sent on the pet actor before zoning, for transit).
+    #[brw(magic = 266u32)]
+    ActorFadeOut {},
+
+    /// Fades the pet IN (sent on the pet actor at the zone destination). The zone-in visual is a
+    /// fade-in, not a birth animation.
+    #[brw(magic = 267u32)]
+    ActorFadeIn {},
+
+    /// Carried during pet teardown; param is the pet's BNpcName id.
+    #[brw(magic = 268u32)]
+    WithdrawMsg {
+        /// BNpcName id of the withdrawn pet.
+        name_id: u32,
+    },
+
+    /// Pet-command battle-log notification (e.g. "issued the 'follow' command to Carbuncle").
+    #[brw(magic = 269u32)]
+    PetCommandLog {
+        /// BNpcName id of the pet (e.g. 10261 = Carbuncle).
+        bnpc_name: u32,
+        /// The PetAction id that was ordered.
+        pet_action_id: u32,
     },
 
     #[brw(magic = 270u32)]

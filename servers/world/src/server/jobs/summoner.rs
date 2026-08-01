@@ -191,8 +191,8 @@ struct SummonerPetSpawnSpec {
     name: &'static str,
     model_chara: u16,
     display_flags: u32,
-    parameter_unk3: u32,
-    parameter_unk4: u32,
+    parameter_pet_guard_mode: u32,
+    parameter_pet_auto_mode: u32,
 }
 
 const SUMMONER_CARBUNCLE_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -202,8 +202,8 @@ const SUMMONER_CARBUNCLE_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
     name: "宝石兽",
     model_chara: 411,
     display_flags: 0x0004_0028,
-    parameter_unk3: 5,
-    parameter_unk4: 7,
+    parameter_pet_guard_mode: 5,
+    parameter_pet_auto_mode: 7,
 };
 
 const SUMMONER_SOLAR_BAHAMUT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -213,8 +213,8 @@ const SUMMONER_SOLAR_BAHAMUT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec 
     name: "烈日巴哈姆特",
     model_chara: 4038,
     display_flags: 0x0004_002B,
-    parameter_unk3: 0,
-    parameter_unk4: 0,
+    parameter_pet_guard_mode: 0,
+    parameter_pet_auto_mode: 0,
 };
 
 const SUMMONER_BAHAMUT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -224,8 +224,8 @@ const SUMMONER_BAHAMUT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
     name: "亚灵神巴哈姆特",
     model_chara: 1930,
     display_flags: 0x0004_002B,
-    parameter_unk3: 0,
-    parameter_unk4: 0,
+    parameter_pet_guard_mode: 0,
+    parameter_pet_auto_mode: 0,
 };
 
 const SUMMONER_IFRIT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -235,8 +235,8 @@ const SUMMONER_IFRIT_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
     name: "红宝石伊弗利特",
     model_chara: 3122,
     display_flags: 0x0004_002B,
-    parameter_unk3: 0,
-    parameter_unk4: 0,
+    parameter_pet_guard_mode: 0,
+    parameter_pet_auto_mode: 0,
 };
 
 const SUMMONER_TITAN_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -246,8 +246,8 @@ const SUMMONER_TITAN_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
     name: "黄宝石泰坦",
     model_chara: 3124,
     display_flags: 0x0004_002B,
-    parameter_unk3: 0,
-    parameter_unk4: 0,
+    parameter_pet_guard_mode: 0,
+    parameter_pet_auto_mode: 0,
 };
 
 const SUMMONER_GARUDA_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
@@ -257,8 +257,8 @@ const SUMMONER_GARUDA_SPAWN: SummonerPetSpawnSpec = SummonerPetSpawnSpec {
     name: "绿宝石迦楼罗",
     model_chara: 3123,
     display_flags: 0x0004_002B,
-    parameter_unk3: 0,
-    parameter_unk4: 0,
+    parameter_pet_guard_mode: 0,
+    parameter_pet_auto_mode: 0,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -295,27 +295,34 @@ fn send_summoner_pet_parameters_with_flags(
     network: &mut NetworkState,
     owner_actor_id: ObjectId,
     pet_id: u32,
-    unk3: u32,
-    unk4: u32,
+    pet_guard_mode: u32,
+    pet_auto_mode: u32,
 ) {
-    send_summoner_pet_parameters_with_mount_state(network, owner_actor_id, pet_id, unk3, unk4, 0);
+    send_summoner_pet_parameters_with_mount_state(
+        network,
+        owner_actor_id,
+        pet_id,
+        pet_guard_mode,
+        pet_auto_mode,
+        0,
+    );
 }
 
 fn send_summoner_pet_parameters_with_mount_state(
     network: &mut NetworkState,
     owner_actor_id: ObjectId,
     pet_id: u32,
-    unk3: u32,
-    unk4: u32,
+    pet_guard_mode: u32,
+    pet_auto_mode: u32,
     mount_state: u32,
 ) {
     network.send_to_by_actor_id(
         owner_actor_id,
         FromServer::ActorControlSelf(ActorControlCategory::SetPetParameters {
             pet_id,
-            unk2: 2,
-            unk3,
-            unk4,
+            pet_stance: 2,
+            pet_guard_mode,
+            pet_auto_mode,
             mount_state,
         }),
         DestinationNetwork::ZoneClients,
@@ -325,8 +332,8 @@ fn send_summoner_pet_parameters_with_mount_state(
 fn clear_summoner_pet_binding(
     network: &mut NetworkState,
     owner_actor_id: ObjectId,
-    unk3: u32,
-    unk4: u32,
+    pet_guard_mode: u32,
+    pet_auto_mode: u32,
 ) {
     network.send_to_by_actor_id(
         owner_actor_id,
@@ -334,8 +341,8 @@ fn clear_summoner_pet_binding(
             owner_id: owner_actor_id,
             pet_id: 0,
             pet_actor_id: SUMMONER_INVALID_PET_ACTOR_ID,
-            unk2: 1,
-            unk3: 1,
+            dismiss: 1,
+            storage_target: 1,
         }),
         DestinationNetwork::ZoneClients,
     );
@@ -343,9 +350,9 @@ fn clear_summoner_pet_binding(
         owner_actor_id,
         FromServer::ActorControlSelf(ActorControlCategory::SetPetParameters {
             pet_id: 0,
-            unk2: 2,
-            unk3,
-            unk4,
+            pet_stance: 2,
+            pet_guard_mode,
+            pet_auto_mode,
             mount_state: 0,
         }),
         DestinationNetwork::ZoneClients,
@@ -564,17 +571,7 @@ pub(crate) fn send_carried_pet_fade_in(
     network.send_in_range_inclusive_instance(
         pet_actor_id,
         instance,
-        FromServer::ActorControl(
-            pet_actor_id,
-            ActorControlCategory::Unknown {
-                category: 267,
-                param1: 0,
-                param2: 0,
-                param3: 0,
-                param4: 0,
-                param5: 0,
-            },
-        ),
+        FromServer::ActorControl(pet_actor_id, ActorControlCategory::ActorFadeIn {}),
         DestinationNetwork::ZoneClients,
     );
     network.send_in_range_inclusive_instance(
@@ -635,24 +632,21 @@ pub(crate) fn sync_pet_for_mount(
         DestinationNetwork::ZoneClients,
     );
 
-    let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
-    send_summoner_pet_parameters_with_mount_state(network, owner_actor_id, pet_id, unk3, unk4, 1);
+    let (pet_guard_mode, pet_auto_mode) = summoner_pet_parameter_flags(pet_id);
+    send_summoner_pet_parameters_with_mount_state(
+        network,
+        owner_actor_id,
+        pet_id,
+        pet_guard_mode,
+        pet_auto_mode,
+        1,
+    );
 
     for pet_actor_id in pet_ids {
         network.send_in_range_inclusive_instance(
             pet_actor_id,
             instance,
-            FromServer::ActorControl(
-                pet_actor_id,
-                ActorControlCategory::Unknown {
-                    category: 266,
-                    param1: 0,
-                    param2: 0,
-                    param3: 0,
-                    param4: 0,
-                    param5: 0,
-                },
-            ),
+            FromServer::ActorControl(pet_actor_id, ActorControlCategory::ActorFadeOut {}),
             DestinationNetwork::ZoneClients,
         );
         network.send_in_range_inclusive_instance(
@@ -673,7 +667,14 @@ pub(crate) fn sync_pet_for_mount(
         );
     }
 
-    send_summoner_pet_parameters_with_mount_state(network, owner_actor_id, pet_id, unk3, unk4, 1);
+    send_summoner_pet_parameters_with_mount_state(
+        network,
+        owner_actor_id,
+        pet_id,
+        pet_guard_mode,
+        pet_auto_mode,
+        1,
+    );
 }
 
 pub(crate) fn sync_pet_after_dismount(
@@ -704,17 +705,7 @@ pub(crate) fn sync_pet_after_dismount(
         network.send_in_range_inclusive_instance(
             pet_actor_id,
             instance,
-            FromServer::ActorControl(
-                pet_actor_id,
-                ActorControlCategory::Unknown {
-                    category: 267,
-                    param1: 0,
-                    param2: 0,
-                    param3: 0,
-                    param4: 0,
-                    param5: 0,
-                },
-            ),
+            FromServer::ActorControl(pet_actor_id, ActorControlCategory::ActorFadeIn {}),
             DestinationNetwork::ZoneClients,
         );
         network.send_in_range_inclusive_instance(
@@ -735,8 +726,14 @@ pub(crate) fn sync_pet_after_dismount(
         );
     }
 
-    let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
-    send_summoner_pet_parameters_with_flags(network, owner_actor_id, pet_id, unk3, unk4);
+    let (pet_guard_mode, pet_auto_mode) = summoner_pet_parameter_flags(pet_id);
+    send_summoner_pet_parameters_with_flags(
+        network,
+        owner_actor_id,
+        pet_id,
+        pet_guard_mode,
+        pet_auto_mode,
+    );
 }
 
 pub(crate) fn update_summoner_gauge_if_needed(
@@ -798,8 +795,8 @@ pub(crate) fn dismiss_pet(
             owner_id: owner_actor_id,
             pet_id: 0,
             pet_actor_id: ObjectId::default(),
-            unk2: 0,
-            unk3: 0,
+            dismiss: 0,
+            storage_target: 0,
         }),
         DestinationNetwork::ZoneClients,
     );
@@ -807,9 +804,9 @@ pub(crate) fn dismiss_pet(
         owner_actor_id,
         FromServer::ActorControlSelf(ActorControlCategory::SetPetParameters {
             pet_id: 0,
-            unk2: 0,
-            unk3: 0,
-            unk4: 7,
+            pet_stance: 0,
+            pet_guard_mode: 0,
+            pet_auto_mode: 7,
             mount_state: 0,
         }),
         DestinationNetwork::ZoneClients,
@@ -1060,8 +1057,8 @@ fn prepare_demi_summon_transition(
         network,
         owner_actor_id,
         demi_spec.pet_id,
-        demi_spec.parameter_unk3,
-        demi_spec.parameter_unk4,
+        demi_spec.parameter_pet_guard_mode,
+        demi_spec.parameter_pet_auto_mode,
     );
 }
 
@@ -1077,8 +1074,8 @@ fn prepare_elemental_primal_transition(
         network,
         owner_actor_id,
         primal_spec.pet_id,
-        primal_spec.parameter_unk3,
-        primal_spec.parameter_unk4,
+        primal_spec.parameter_pet_guard_mode,
+        primal_spec.parameter_pet_auto_mode,
     );
 }
 
@@ -1135,8 +1132,8 @@ fn spawn_summoner_pet_actor(
             owner_id: owner_actor_id,
             pet_id: spec.pet_id,
             pet_actor_id,
-            unk2: 1,
-            unk3: 1,
+            dismiss: 1,
+            storage_target: 1,
         }),
         DestinationNetwork::ZoneClients,
     );
@@ -1154,8 +1151,8 @@ fn spawn_summoner_pet_actor(
         network,
         owner_actor_id,
         spec.pet_id,
-        spec.parameter_unk3,
-        spec.parameter_unk4,
+        spec.parameter_pet_guard_mode,
+        spec.parameter_pet_auto_mode,
     );
 
     let mut spawn = retail_carbuncle_spawn_template().unwrap_or_default();
@@ -1859,8 +1856,8 @@ fn spawn_fresh_carbuncle(
                 owner_id: from_actor_id,
                 pet_id,
                 pet_actor_id,
-                unk2: 1,
-                unk3: 1,
+                dismiss: 1,
+                storage_target: 1,
             }),
             DestinationNetwork::ZoneClients,
         );
@@ -1983,8 +1980,8 @@ pub(crate) fn reinstate_carried_pet(
                 owner_id: from_actor_id,
                 pet_id,
                 pet_actor_id,
-                unk2: 1,
-                unk3: 1,
+                dismiss: 1,
+                storage_target: 1,
             }),
             DestinationNetwork::ZoneClients,
         );
@@ -2016,8 +2013,14 @@ pub(crate) fn reinstate_carried_pet(
             DestinationNetwork::ZoneClients,
         );
 
-        let (unk3, unk4) = summoner_pet_parameter_flags(pet_id);
-        send_summoner_pet_parameters_with_flags(&mut network, from_actor_id, pet_id, unk3, unk4);
+        let (pet_guard_mode, pet_auto_mode) = summoner_pet_parameter_flags(pet_id);
+        send_summoner_pet_parameters_with_flags(
+            &mut network,
+            from_actor_id,
+            pet_id,
+            pet_guard_mode,
+            pet_auto_mode,
+        );
 
         network.find_by_actor(from_actor_id)
     };
