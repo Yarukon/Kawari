@@ -344,10 +344,17 @@ pub struct PlayerSetup {
     /// ContentsNote completion bitmap (104 bits = 13 bytes), one bit per ContentsNote entry.
     pub contents_note: [u8; CONTENTS_NOTE_BITMASK_SIZE],
     pub unlocked_secret_recipe_books: [u8; SECRET_RECIPE_BOOK_BITMASK_SIZE],
-    // TODO Figure out what client should do to trigger reading from this region bruh
+    /// wire 0x8D3..0x8EE (28 bytes) -> PlayerState+0x547 = guildhest first-clear completion matrix:
+    /// 14 guildhests x 14 combat base-classes, laid out as 14 u16 rows (row = GuildOrder index a1-1,
+    /// 0..13; bit = base-class ordinal 0..13). Jobs fold to their parent ClassJob before indexing
+    /// (e.g. Summoner -> Arcanist), so all base classes fit the 16-bit stride. Written via ActorControl
+    /// category 149 (arg1 = guildhest 1..14, arg2 = ClassJobId, arg3 = set/clear) and read by the Duty
+    /// Finder reward preview (AgentContentsFinderInterface): a set bit means that base class already
+    /// cleared that guildhest, suppressing the first-clear bonus. Getter sub_1419B0460 / setter
+    /// sub_1419B0390 over PlayerState+0x547 (== byte_142AAEE7F).
     #[br(count = 28)]
     #[bw(pad_size_to = 28)]
-    pub unknown879: Vec<u8>,
+    pub guildhest_completion: Vec<u8>,
     pub relic_monster_progress: [u8; 10],
     pub objective_progress: [u8; 2],
     #[br(count = ADVENTURE_BITMASK_SIZE)]
