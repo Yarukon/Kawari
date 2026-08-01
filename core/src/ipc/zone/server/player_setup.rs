@@ -25,12 +25,17 @@ use crate::{
 pub struct PlayerSetup {
     /// The content ID of the player.
     pub content_id: u64,
-    /// This seems to be unused by the client.
+    /// Not exactly unused but unsure of the purpose.
     pub padding: [u64; 2],
     /// The actor ID of the player.
     pub actor_id: ObjectId,
     pub rested_exp: u32,
     pub companion_current_exp: u32,
+    /// 0x24 (u32 = 79) -> PlayerState+0x2FC. Quest-journal PRNG seed: sub_140C1B4A0
+    /// (journal list builder) reads it as dword_142AAEC34 and runs 11 pseudo-random
+    /// iterations (%1000 / %100) to select the randomized journal/supply entries.
+    /// NOT "GCSupply stuff" - that FFXIVClientStructs comment is stale (0x2F0 is DoH/DoL
+    /// levels, 0x2FC is this seed).
     pub unknown1c: u32,
     pub fish_caught: u32,
     pub use_bait_catalog_id: u32,
@@ -43,12 +48,28 @@ pub struct PlayerSetup {
     pub weekly_bingo_task_status: [u8; 4],
     pub weekly_bingo_flags: u32,
     pub companion_time_left: f32,
-    pub unknown44: [u8; 18],
+    /// 0x54..0x57
+    pub unknown44: [u8; 4],
+    /// 0x58..0x5B -> PlayerState+0x8D8 (FFXIVClientStructs: UnkTofuTimestamp, private)
+    pub tofu_timestamp: u32,
+    /// 0x5C..0x5D
+    pub unknown_after_tofu: [u8; 2],
+    /// 0x5E..0x65 - 4 x u16 -> PvPProfile+0x16..0x1C (unnamed area 0x14-0x23 between GC
+    /// ranks and Series). All 0 in retail; no real reader found (searched PvP* code -
+    /// 0x16/0x18/0x1A/0x1C hits are other structs' offsets). Likely reserved/dead.
+    pub pvp_unknowns: [u16; 4],
+    /// 0x66..0x67 -> PvPProfile+0x28 = SeriesExperience. Retail: 0.
     pub pvp_series_exp: u16,
     /// How many player commendations you received.
     pub player_commendations: i16,
+    /// 0x6A..0x6D -> PlayerState+0x188/0x18C = FestivalQuestWork / festival flag bitmap
+    /// (sub_140BDD9F0: sets a bit in PlayerState+0x18C per ClassJob).
     pub unknown64: [u16; 2],
     pub frontline_weekly_matches: u16,
+    /// 0x70 (u16 = 0xC000) = AnimaWeapon object +12 field: low 14 bits = enhance points
+    /// (& 0x3FFF, 0 here), bit 0x4000 = have 改良型元灵透镜 (Improved Anima Lens,
+    /// EventItem 2002029, quest 67932 - "人造元灵终绽放" stage, user-confirmed).
+    /// Written by sub_1408931D0, read by GetAnimaWeapon7EnhancePoint.
     pub unknown2: u16,
     pub active_gc_army_expedition: u16,
     pub active_gc_army_training: u16,
@@ -95,13 +116,15 @@ pub struct PlayerSetup {
     pub companion_color: u8,
     pub companion_favorite_feed: u8,
     pub favourite_aetheryte_count: u8,
-    pub unknown98: u8,
+    /// 0x9B -> QuestManager+0x6D8 (not a PlayerState field)
+    pub daily_quest_seed: u8,
+    /// 0x9C -> global qword_142AB2CB4
     pub unknown97: u8,
     pub weekly_lockout_info: u8,
     pub relic_id: u8,
     pub relic_note_id: u8,
-    pub sightseeing21_to_80_unlock: u8, // TODO: might be SightseeingLogUnlockState in ClientStructs?
-    pub sightseeing_heavensward_unlock: u8, // TODO: might be SightseeingLogUnlockStateEx in ClientStructs?
+    pub sightseeing_log_unlock_state: u8,
+    pub sightseeing_log_unlock_state_ex: u8,
     pub unknown9e: u8,
     pub unknown9e1: u8,
     pub meister_flag: u8,
@@ -109,13 +132,19 @@ pub struct PlayerSetup {
     #[br(map = read_bool_from::<u8>)]
     #[bw(map = write_bool_as::<u8>)]
     pub can_do_triple_triad_matches: bool,
-    pub aether_current_comp_flg_set_bitmask1: u8, // This is the first byte of the full bitmask. It contains the HW zones, The Fringes and The Ruby Sea. Why this one is here and the rest far down, no idea.
+    // This is the first byte of the full bitmask. It contains the HW zones, The Fringes and The Ruby Sea. Why this one is here and the rest far down, no idea.
+    pub aether_current_comp_flg_set_bitmask1: u8,
     pub unknown_after_aether: u8,
     #[br(map = read_bool_from::<u8>)]
     #[bw(map = write_bool_as::<u8>)]
     pub has_new_gc_army_candidate: bool,
+    /// 0xA9 -> PlayerState+0x739 = CompletedLoVMStages. LoVM = Lord of Verminion
+    /// (萌宠之王, Gold Saucer minion-battle content) - completed stage count.
+    /// Retail: 2 (player completed 2 LoVM stages).
     pub completed_lovm_stages: u8,
     pub unk111: u8,
+    /// 0xAB = SatisfactionSupplyManager.SupplySeed (weekly pseudorandom seed for the
+    /// selected crafted items of the satisfaction NPCs, FFXIVClientStructs SatisfactionSupplyManager).
     pub supply_seed: u8,
     pub gold_saucer_content_status: u8,
     /// Last expansion mentorship was held. Starts at 1 with Shadowbringers.
@@ -127,6 +156,8 @@ pub struct PlayerSetup {
     pub series_claimed_rank: u8,
     pub previous_series_claimed_rank: u8,
     pub previous_series_rank: u8,
+    /// 0xB5..0xBB -> PlayerState+0x188..0x18E (FestivalQuestWork area, see sub_140BDD810/
+    /// sub_140BDD9C0 - 3-byte-per-entry festival quest work array + u16 festival flag).
     pub unknowna3: [u8; 7],
     /// Current EXP for all classjobs. This doesn't control the class' "unlocked state" in the Character UI.
     #[br(count = CLASSJOB_ARRAY_SIZE)]
@@ -135,9 +166,12 @@ pub struct PlayerSetup {
     pub experience_maelstrom: u32,
     pub experience_twin_adder: u32,
     pub experience_immortal_flames: u32,
+    /// 0x154..0x15F (12 bytes = 3 u32) -> PvPProfile+0x38..0x40 = FrontlineTotalFirstPlace /
+    /// SecondPlace / ThirdPlace. Retail: [3, 4, 1] (1st 3x, 2nd 4x, 3rd 1x).
+    /// (Was misnamed unknown138.)
     #[br(count = 12)]
     #[bw(pad_size_to = 12)]
-    pub unknown138: Vec<u8>,
+    pub frontline_total_places: Vec<u8>,
     pub unknown_unix_timestamp: i32,
     /// Current levels for all classjobs. If non-zero, the class is visibly "unlocked" in the Character UI.
     #[br(count = CLASSJOB_ARRAY_SIZE)]
@@ -145,9 +179,32 @@ pub struct PlayerSetup {
     pub levels: Vec<u16>,
     pub ui_festival_ids: [FestivalId; 8],
     pub ui_festival_phases: [u16; 8],
-    #[br(count = 232)]
-    #[bw(pad_size_to = 232)]
-    pub unknown194: Vec<u8>,
+    /// 44 x FishingRecordType best-catch fish ids (PlayerState+0x344, packet 0x1CA..0x221).
+    /// Index = FishingRecordType row (sheet 249, 0..43). Value < 0x4E20 (20000) = FishParameter
+    /// row id (sheet 247, normal fishing); >= 0x4E20 = SpearfishingItem row id (sheet 610,
+    /// spearfishing); 0 = no record. Read via word_142AAEC7C by FishRecord.Initialize
+    /// (0x140BF1899, <20000) and sub_140BF20E0 (0x140BF2169, >=20000).
+    /// Retail capture: 金鳞鱼1056/101.6, 姥鲨898/520.5, 食人鲶鱼355/132.0,
+    /// 风筝猫鱼415/239.5, 旋齿鲨290/183.9, 云海帝王294/269.6, 梦幻云海鱼379/76.3,
+    /// 火山龟373/62.7, 噬卵者1113/233.3 (ilms) + 6 spearfishing records.
+    /// NOTE: values are FishParameter/SpearfishingItem row ids, NOT Item row ids -
+    /// earlier identification as "Deprecated gear" was a numeric coincidence.
+    #[br(count = 44)]
+    #[bw(pad_size_to = 44 * 2)]
+    pub fishing_record_best_fish: Vec<u16>,
+    /// 44 x matching best-catch max size (ilms x 10, PlayerState+0x39C, packet 0x222..0x279).
+    /// Same index as fishing_record_best_fish (e.g. 旋齿鲨 183.9 ilms = 1839).
+    #[br(count = 44)]
+    #[bw(pad_size_to = 44 * 2)]
+    pub fishing_record_best_size: Vec<u16>,
+    /// 0x27A..0x2B1. Mixed: 0x28C..0x2AA = QuestManager beast-tribe data; 0x2AC..0x2B1 =
+    /// Frontline weekly places (3 u16 -> PvPProfile+0x46/0x48/0x4A FrontlineWeeklyFirst/
+    /// Second/ThirdPlace, all 0 in retail). Kept as padding so following offsets stay correct.
+    #[br(count = 56)]
+    #[bw(pad_size_to = 56)]
+    pub unknown_after_194: Vec<u8>,
+    /// 0x2B2..0x2C9 (12 u16) = SatisfactionSupplyManager._satisfaction (current-rank satisfaction
+    /// points per satisfaction NPC). All 0 in retail capture. Not read by PlayerState.ReadPacket.
     pub supply_satisfcation: [u16; 12],
     #[br(count = 21)]
     #[bw(pad_size_to = 21)]
@@ -170,7 +227,8 @@ pub struct PlayerSetup {
     #[br(count = FRAMERS_KIT_BITMASK_SIZE)]
     #[bw(pad_size_to = FRAMERS_KIT_BITMASK_SIZE)]
     pub framers_kits_mask: Vec<u8>,
-    pub padding_probably_after_framers_kit: [u8; 11],
+    // NOTE: no padding after framers - FRAMERS_KIT_BITMASK_SIZE (44) fills 0x320..0x34B exactly,
+    // `name` starts right at 0x34C (verified via retail capture: 0x34A-0x34B = 0x20 0x00 are framers bits).
     // NOTE: It seems this name is bigger than normal, but bytes >=40 may contain the online ID...?
     #[br(count = 64)]
     #[bw(pad_size_to = 64)]
@@ -188,14 +246,17 @@ pub struct PlayerSetup {
     pub aetherytes: Vec<u8>,
     pub favorite_aetheryte_ids: [u16; 4],
     pub free_aetheryte_id: u16,
+    /// Free Aetheryte for Playstation Plus members.
     pub ps_plus_free_aetheryte_id: u16,
-    pub padding_probably_after_ps_plus: [u8; 2],
+    /// Free Aetheryte for Nintendo Switch Online members.
+    pub nso_free_aetheryte_id: u16,
+    // TODO maps_with_up_to_16_regions and maps_with_up_to_32_regions are also required auto ARRAY_SIZE
     #[br(count = 162)]
     #[bw(pad_size_to = 162 * 2)]
-    pub discovery_related_unk1: Vec<u16>,
+    pub maps_with_up_to_16_regions: Vec<u16>,
     #[br(count = 48)]
     #[bw(pad_size_to = 48 * 4)]
-    pub discovery_related_unk2: Vec<u32>,
+    pub maps_with_up_to_32_regions: Vec<u32>,
     pub padding_probably_after_discovery_related_unk2: [u8; 4],
     /// Which Active Help guides the player has seen.
     #[br(count = ACTIVE_HELP_BITMASK_SIZE)]
@@ -211,22 +272,38 @@ pub struct PlayerSetup {
     #[br(count = CUTSCENE_SEEN_BITMASK_SIZE)]
     #[bw(pad_size_to = CUTSCENE_SEEN_BITMASK_SIZE)]
     pub cutscene_seen_mask: Vec<u8>,
-    pub unknown6ff: u16,
-    pub padding_probably_after_unknown6ff: [u8; 3],
+    /// 0x750 (1 byte, not u16 - Buddy.ReadPacket reads 0x751 onward).
+    pub unknown6ff: u8,
+    /// 0x751..0x75E (14 bytes = BUDDY_EQUIP_BITMASK_SIZE).
     #[br(count = BUDDY_EQUIP_BITMASK_SIZE)]
     #[bw(pad_size_to = BUDDY_EQUIP_BITMASK_SIZE)]
     pub buddy_equip_mask: Vec<u8>,
-    pub buddy_equip_mask_padding: u8,
+    /// 0x75F..0x761 = equipped BuddyEquip row ids (head/body/legs).
+    /// Retail capture: 16 16 16 = 斯莱普尼尔装甲 (Sleipnir Barding, BuddyEquip row 16) equipped on all 3 slots.
     pub companion_equipped_head: u8,
     pub companion_equipped_body: u8,
     pub companion_equipped_legs: u8,
-    #[br(count = 15)]
-    #[bw(pad_size_to = 15)]
-    pub unknown_mask: Vec<u8>,
+    /// 0x762..0x765 (4 bytes) -> PlayerState+0x2EC..0x2EF (UIState+0xD24). Grand Company
+    /// Supply "submitted this week" flag bitmap (55 bits): sub_140C1B4A0 tests
+    /// (128>>(v4&7)) & byte_142AAEC24[v4>>3] for v4=0..54. Bit i = entry (i+1), 0-based.
+    /// Order matches doh_dol_levels: bit 0-7 = crafters (CRP, BSM, ARM, GSM, LTW, WVR,
+    /// ALC, CUL), bit 8 = Miner, bit 9 = Botanist, bit 10 = Fisher. VERIFIED live:
+    /// submitting Miner GC-supply set bit 8 (00 00 00 00 -> 00 80 00 00); completing
+    /// Custom Delivery (satisfaction) did NOT change it (separate system).
+    pub unknown_after_buddy: [u8; 4],
+    /// 0x766..0x770 (11 bytes) -> PlayerState+0x2F0..0x2FA (UIState+0xD28) = DoH/DoL
+    /// (crafter/gatherer) job levels, one byte per job. Retail capture:
+    /// 10x 100 + 90 (Fisher lv90 last) - user-confirmed. Read by quest-journal logic
+    /// (sub_140C1AD10, which caps values at 100). NOT "GCSupply stuff" as FFXIVClientStructs
+    /// guessed - that comment is stale.
+    #[br(count = 11)]
+    #[bw(pad_size_to = 11)]
+    pub doh_dol_levels: Vec<u8>,
     #[br(count = CAUGHT_FISH_BITMASK_SIZE)]
     #[bw(pad_size_to = CAUGHT_FISH_BITMASK_SIZE)]
     pub caught_fish_mask: Vec<u8>,
-    pub padding_probably_after_caught_fish: [u8; 2],
+    // NOTE: no padding after caught_fish - unlocked_fishing_spots starts right at 0x830
+    // (verified: caught_fish 0x771..0x82F, then fishing_spots 0x830..0x859).
     #[br(count = UNLOCKED_FISHING_SPOTS_BITMASK_SIZE)]
     #[bw(pad_size_to = UNLOCKED_FISHING_SPOTS_BITMASK_SIZE)]
     pub unlocked_fishing_spots: Vec<u8>,
@@ -236,11 +313,21 @@ pub struct PlayerSetup {
     pub caught_spearfish_mask: Vec<u8>,
     pub unlocked_spearfishing_notebooks: [u8; 8],
     pub padding_spearfishing: u8,
-    pub rank_malestrom: u8,
-    pub rank_twin_adder: u8,
-    pub rank_immortal_flames: u8,
+    /// 0x88A..0x88C -> PvPProfile+0x10..0x12 = Grand Company ranks: RankMaelstrom /
+    /// RankTwinAdder / RankImmortalFlames (read by PvPProfile.ReadPacket, PvPProfile_Instance
+    /// @0x142ab21ec). Retail: 11 00 00 = Maelstrom rank 0x11(17), other GCs 0 (player only
+    /// joined one GC). (0x88D..0x8A0 is the beast-tribe rank array, all 0x08 = max rank 8.)
+    pub gc_ranks: [u8; 3],
     pub beast_reputation_rank: [u8; BEAST_TRIBE_ARRAY_SIZE],
+    // TODO Is this needed auto ARRAY_SIZE too?
+    /// 0x8A1..0x8AA -> PlayerState+0x520..0x529 = _contentRouletteCompletion bit 0-9
+    /// (10 bytes). Verified by InstanceContent.IsRouletteIncomplete (0x140C2A5CF): reads
+    /// byte_142AAEE58[ContentRoulette-row+71], index 0..11 -> the full bitmap is 12 bytes.
     pub content_roulette_completion: [u8; 10],
+    // TODO Merge this with content_roulette_completion, they are unite
+    /// 0x8AB..0x8AC -> PlayerState+0x52A..0x52B = _contentRouletteCompletion bit 10-11
+    /// (extension of content_roulette_completion, same IsRouletteIncomplete bitmap).
+    pub unknown_after_roulette: [u8; 2],
     /// Persistent CPose selections, one index per PoseType category:
     /// 0=Idle, 1=WeaponDrawn, 2=Sit, 3=GroundSit, 4=Doze, 5=Umbrella, 6=Accessory, 7=reserved.
     /// The client stores these in `PlayerState.SelectedPoses` and re-applies the matching one
@@ -249,26 +336,36 @@ pub struct PlayerSetup {
     pub player_state_flags1: PlayerStateFlags1,
     pub player_state_flags2: PlayerStateFlags2,
     pub player_state_flags3: PlayerStateFlags3,
+
+    // TODO there's no padding_after_content, is unite with contents_note_completion_flags, need auto BITMASK_SIZE for contents_note_completion_flags and unlocked_secret_recipe_books
     pub contents_note_completion_flags: [u8; 8],
     pub padding_after_content: [u8; 5],
     pub unlocked_secret_recipe_books: [u8; 14],
+    // TODO Figure out what client should do to trigger reading from this region bruh
     #[br(count = 28)]
     #[bw(pad_size_to = 28)]
     pub unknown879: Vec<u8>,
-    pub monster_progress: [u8; 10],
+    pub relic_monster_progress: [u8; 10],
     pub objective_progress: [u8; 2],
     #[br(count = ADVENTURE_BITMASK_SIZE)]
     #[bw(pad_size_to = ADVENTURE_BITMASK_SIZE)]
     pub adventure_mask: Vec<u8>,
     #[br(count = 124)]
     #[bw(pad_size_to = 124)]
-    pub hunting_mark_mask: Vec<u8>,
+    pub hunting_mark_data: Vec<u8>,
     #[br(count = TRIPLE_TRIAD_CARDS_BITMASK_SIZE)]
     #[bw(pad_size_to = TRIPLE_TRIAD_CARDS_BITMASK_SIZE)]
     pub triple_triad_cards: Vec<u8>,
+    // TODO Need to add auto BITMASK_SIZE for this
+    /// 0x9DE..0x9EE (17 bytes = 136 bits) -> UIState+0x1A1E8 = 0x142AC80E8, Triple Triad
+    /// NPC-beaten bitmap. Checked by UIState.IsTripleTriadNpcBeaten (0x140C49710): for
+    /// NPC ids 2293762..2293873 (0x230002..0x230091), tests bit (row+71-derived index)
+    /// in this 17-byte bitmap (v4>>3 < 0x11). Adjacent to UnlockedTripleTriadCardsCount
+    /// (0x142AC80E0). Retail: 12 DA 3B 59 21 0D E2 00 00 00 00 00 00 08 00 00 00 =
+    /// which TT NPCs the player has beaten.
     #[br(count = 17)]
     #[bw(pad_size_to = 17)]
-    pub unknown95a: Vec<u8>,
+    pub triple_triad_npc_beaten: Vec<u8>,
     // We do -1 because of aether_current_comp_flg_set_bitmask1 being present way earlier.
     #[br(count = AETHER_CURRENT_COMP_FLG_SET_BITMASK_SIZE - 1)]
     #[bw(pad_size_to = AETHER_CURRENT_COMP_FLG_SET_BITMASK_SIZE - 1)]
@@ -284,15 +381,38 @@ pub struct PlayerSetup {
     pub orchestrion_roll_mask: Vec<u8>,
     #[br(count = BEGINNER_TRAINING_ARRAY_SIZE)]
     #[bw(pad_size_to = BEGINNER_TRAINING_ARRAY_SIZE)]
-    pub completed_beginner_training: Vec<u8>, // TODO: not confirmed because I can't access this menu right now
+    pub completed_beginner_training: Vec<u8>, // 0xAA0->0x688 _completedBeginnerTraining
+
+    // TODO Figure out how the heck client is reading this
+    /// 0xAA4..0xAA7 -> PlayerState+0x68C..0x68F = _completedMaskedCarnivale (32-bit bitmap of
+    /// 0xAA4..0xAAE (11 bytes) -> bit-compressed into global AnimaWeapon object
+    /// (unk_142AA8CB0) by sub_140892AD0: each byte & 0x7F (7-bit value), bit7 = flag.
+    /// a2[8] bit7 -> EventItemManager 98 + EventItem 2001993 (乌兰的笔记 - trade token used
+    /// to exchange for anima weapon enhancement items); a2[9] bit7 -> EventItemManager 97 +
+    /// EventItem 2001994 (元灵透镜/Anima Lens);
+    /// a1[11] = a2[7]>>7. Referenced by LuaPc.SaveAnimaWeapon5EventItems /
+    /// GetAnimaWeapon7EnhancePoint / IsEquipAnimaWeapon and HandleActorControlPacket.
+    /// 11 bytes = the 11 jobs of the original 3.x Anima/Soul Weapon system (3.15),
+    /// NOT the 13 jobs of the later 5.x AnimaWeapon5 upgrade (AnimaWeapon5 sheet has 13 rows).
+    /// VERIFIED: player has Summoner anima weapon in progress ("人造元灵终绽放") ->
+    /// retail byte[8] = 0x80 (bit7=1, 7-bit value 0 = no enhancement points), so SMN is
+    /// the 9th slot in that 11-job ordering.
+    /// NOT a PlayerState field (earlier "masked carnivale" id was wrong - that is at 0xB72).
     pub unk_completion2: [u8; 11],
 
     pub weekly_bingo_order_data: [u8; 16],
     pub weekly_bingo_reward_data: [u8; 4],
 
+    // TODO Need to implement ARRAY_SIZE
+    /// 0xAC3..0xACE (12 u8) = SatisfactionSupplyManager._satisfactionRanks (per-NPC satisfaction
+    /// rank 1-5, the hearts in the UI). Retail capture: 11x 5 + 1x 0 = 11 maxed (5) + the
+    /// 12th NPC added in 7.51 with rank 0 (not yet delivered to).
     pub supply_satisfaction_ranks: [u8; 12],
     pub used_supply_allowances: [u8; 12],
 
+    /// 0xADB (1 byte, value 0x1F in retail) -> PlayerState+0x697 = _unlockedSpecialContent
+    /// (UIState+0x10CF). Bitmap of unlocked special contents; checked by
+    /// UIState.IsInstanceContentUnlocked via unk_142AAEFCF (PlayerState+0x697).
     #[br(count = SPECIAL_CONTENT_ARRAY_SIZE)]
     #[bw(pad_size_to = SPECIAL_CONTENT_ARRAY_SIZE)]
     pub unlocked_special_content: Vec<u8>,
@@ -347,10 +467,16 @@ pub struct PlayerSetup {
     #[bw(pad_size_to = FRONTLINE_ARRAY_SIZE)]
     pub cleared_frontline: Vec<u8>,
 
+    /// 0xB72..0xB75 (4 bytes) -> PlayerState+0x68C..0x68F = _completedMaskedCarnivale
+    /// (32-bit bitmap of completed Masked Carnivale stages). VERIFIED live: player completed
+    /// stages 1-2, value 03 00 00 00 (bit 0,1). Checked by UIState.IsInstanceContentCompleted
+    /// case 13 via unk_142AAEFC4. (ReadPacket 0x140BDCD07: [rdi+0xB72]->[rsi+0x68C]).
     #[br(count = MASKED_CARNIVALE_ARRAY_SIZE)]
     #[bw(pad_size_to = MASKED_CARNIVALE_ARRAY_SIZE)]
     pub cleared_masked_carnivale: Vec<u8>,
 
+    // TODO Need to figure out is this needed auto BITMASK_SIZE too?
+    /// 0xB76..0xB7C (7 bytes) -> PlayerState+0x690..0x696 = _completedVVDNotebookContents.
     pub completed_vvd_notebook_contents: [u8; 7],
 
     #[br(count = MISC_CONTENT_ARRAY_SIZE)]
@@ -361,5 +487,78 @@ pub struct PlayerSetup {
     #[bw(pad_size_to = MISC_CONTENT_ARRAY_SIZE)]
     pub cleared_misc_content: Vec<u8>,
 
+    /// 0xB85..0xB86 (2 bytes, read) -> PlayerState+0x736..0x737; 0xB87 is trailing
+    /// packet padding (never read, ReadPacket has no movzx for it). Retail packet: 00 00 00,
+    /// but runtime values 02 03 observed at 0x736..0x737 (updated after login by other code).
+    /// (Note: 0x738 is GoldSaucerContentStatus from pkt 0xAC, NOT part of this field.)
     pub unknown949: [u8; 3],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binrw::{BinRead, BinWrite};
+    use std::io::Cursor;
+
+    /// Serialized PlayerSetup body must equal the authoritative opcode size (2952 bytes).
+    #[test]
+    fn player_setup_size() {
+        let mut cursor = Cursor::new(Vec::new());
+        PlayerSetup::default().write_le(&mut cursor).unwrap();
+        assert_eq!(cursor.position() as usize, 2952);
+    }
+
+    /// Round-trip layout guard using synthetic sentinel values (no real account data). Writes a
+    /// PlayerSetup with distinctive markers in fields spread head→tail, serializes to exactly 2952
+    /// bytes, reads it back, and asserts each marker survives at its offset — so a future field
+    /// resize/misalignment (the class of bug that produced this struct's 16-byte overrun) fails here.
+    #[test]
+    fn player_setup_roundtrip_layout() {
+        let mut ps = PlayerSetup::default();
+        // sized Vec fields must be filled to their declared length for a faithful round-trip
+        ps.framers_kits_mask = vec![0; FRAMERS_KIT_BITMASK_SIZE];
+        ps.caught_fish_mask = vec![0; CAUGHT_FISH_BITMASK_SIZE];
+        ps.cutscene_seen_mask = vec![0; CUTSCENE_SEEN_BITMASK_SIZE];
+        ps.buddy_equip_mask = vec![0; BUDDY_EQUIP_BITMASK_SIZE];
+
+        // synthetic sentinels spanning the struct
+        ps.content_id = 0x1122334455667788;
+        ps.actor_id = ObjectId(0xABCDEF01);
+        ps.completed_lovm_stages = 7; // head
+        ps.companion_name = "Buddy".to_string();
+        ps.name = "TestChar".to_string(); // mid (right after framers mask)
+        ps.companion_equipped_head = 0x41;
+        ps.companion_equipped_body = 0x42;
+        ps.companion_equipped_legs = 0x43;
+        ps.doh_dol_levels = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        ps.gc_ranks = [0x11, 0x22, 0x33];
+        ps.selected_poses = [1, 2, 3, 4, 5, 6, 7, 0];
+        ps.supply_satisfaction_ranks = [5; 12]; // tail
+        ps.unlocked_special_content = vec![0x1F];
+        ps.cleared_masked_carnivale = vec![0x03, 0, 0, 0];
+
+        let mut cursor = Cursor::new(Vec::new());
+        ps.write_le(&mut cursor).unwrap();
+        assert_eq!(cursor.position() as usize, 2952, "serialized size");
+
+        let bytes = cursor.into_inner();
+        let got = PlayerSetup::read_le(&mut Cursor::new(&bytes)).unwrap();
+
+        assert_eq!(got.content_id, ps.content_id, "content_id");
+        assert_eq!(got.actor_id, ps.actor_id, "actor_id");
+        assert_eq!(got.completed_lovm_stages, 7, "completed_lovm_stages");
+        assert_eq!(got.companion_name, "Buddy", "companion_name");
+        assert_eq!(got.name, "TestChar", "name (offset right after framers mask)");
+        assert_eq!(
+            [got.companion_equipped_head, got.companion_equipped_body, got.companion_equipped_legs],
+            [0x41, 0x42, 0x43],
+            "companion_equipped"
+        );
+        assert_eq!(got.doh_dol_levels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "doh_dol_levels");
+        assert_eq!(got.gc_ranks, [0x11, 0x22, 0x33], "gc_ranks");
+        assert_eq!(got.selected_poses, [1, 2, 3, 4, 5, 6, 7, 0], "selected_poses");
+        assert_eq!(got.supply_satisfaction_ranks, [5; 12], "supply_satisfaction_ranks");
+        assert_eq!(got.unlocked_special_content, vec![0x1F], "unlocked_special_content");
+        assert_eq!(got.cleared_masked_carnivale, vec![0x03, 0, 0, 0], "cleared_masked_carnivale");
+    }
 }
