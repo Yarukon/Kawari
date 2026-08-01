@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use physis::{
     TerritoryIntendedUse,
     layer::{
-        ExitRangeInstanceObject, InstanceObject, LayerEntryData, PopRangeInstanceObject,
+        ExitRangeInstanceObject, InstanceObject, LayerEntryData, PopRangeInstanceObject, PopType,
         TriggerBoxShape,
     },
     lgb::Lgb,
@@ -444,6 +444,30 @@ impl Zone {
                         && object.instance_id == instance_id
                     {
                         return Some((object, pop_range));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Locates the first `PopType::PC` pop range in the zone. Used as a last-resort entrance
+    /// fallback for instanced content that has neither an entrance-circle EObj nor an
+    /// `entrance`-flagged map range (e.g. `InstanceContent.LGBEventRange == 0`); its PC pop ranges
+    /// are the real spawn points. Deterministic layer/object order (same as [`find_pop_range`]).
+    pub fn find_first_pc_pop_range(&self) -> Option<&InstanceObject> {
+        for layer_group in &self.layer_groups {
+            for layer in &layer_group.chunks[0].layers {
+                if !layer.header.has_layer_set(self.layer_set as u32) {
+                    continue;
+                }
+
+                for object in &layer.objects {
+                    if let LayerEntryData::PopRange(pop_range) = &object.data
+                        && pop_range.pop_type == PopType::PC
+                    {
+                        return Some(object);
                     }
                 }
             }
@@ -1164,6 +1188,18 @@ pub fn change_zone_warp_to_entrance(
     } else if let Some((pos, rot)) = entrance_rect {
         exit_position = Some(pos);
         exit_rotation = Some(rot);
+    } else if let Some(destination_object) = target_instance.zone.find_first_pc_pop_range() {
+        // Last resort for instanced content with no entrance circle and no entrance rect (e.g.
+        // InstanceContent.LGBEventRange == 0): warp to the first PC pop range, which is a real
+        // spawn point. Without this the player warps to (0,0,0) and hangs on infinite loading.
+        let (_, rotation, _) =
+            Affine3A::from(destination_object.transform).to_scale_rotation_translation();
+        tracing::info!(
+            "No entrance circle or rect; falling back to first PC pop range in zone {}",
+            target_instance.zone.id
+        );
+        exit_position = Some(pick_point_in_pop_range(destination_object));
+        exit_rotation = Some(euler_to_direction(rotation.to_euler(EulerRot::XYZ)));
     } else {
         tracing::warn!(
             "Failed to find instanced content entrance?! This is a bug in Kawari, please report it!"
@@ -1253,6 +1289,20 @@ fn do_change_zone(
     } else if let Some(destination_object) = target_instance.zone.find_entrance() {
         let (_, rotation, translation) =
             Affine3A::from(destination_object.transform).to_scale_rotation_translation();
+        (
+            Some(Position(translation)),
+            Some(euler_to_direction(rotation.to_euler(EulerRot::XYZ))),
+        )
+    } else if let Some(destination_object) = target_instance.zone.find_first_pc_pop_range() {
+        // Last resort for instanced content with no entrance circle and no entrance rect (e.g.
+        // InstanceContent.LGBEventRange == 0): the first PC pop range is a real spawn point,
+        // which avoids warping the player to (0,0,0) and hanging on infinite loading.
+        let (_, rotation, translation) =
+            Affine3A::from(destination_object.transform).to_scale_rotation_translation();
+        tracing::info!(
+            "No entrance circle or rect; falling back to first PC pop range in zone {}",
+            target_instance.zone.id
+        );
         (
             Some(Position(translation)),
             Some(euler_to_direction(rotation.to_euler(EulerRot::XYZ))),
@@ -1839,6 +1889,8 @@ mod tests {
     use crate::StatusEffects;
     use crate::server::actor::NpcState;
     use kawari::common::Timeline;
+    use physis::layer::{Layer, LayerHeader, Transformation};
+    use physis::lgb::LayerChunk;
 
     /// Insert an owned live pet directly (bypassing `insert_npc`, which loads a timeline file from
     /// disk that isn't present in the unit-test environment).
@@ -1937,6 +1989,72 @@ mod tests {
         let carried = take_combat_state_and_despawn_pets(&mut instance, &mut network, owner)
             .expect("player exists so combat state is returned");
         assert!(carried.summoner.carried_pet.is_none());
+    }
+
+    /// Builds a PopRange InstanceObject at `translation` with the given pop type. Mirrors the
+    /// minimal shape `find_first_pc_pop_range` inspects (pop_type + object translation).
+    fn make_pop_range(instance_id: u32, pop_type: PopType, translation: [f32; 3]) -> InstanceObject {
+        InstanceObject {
+            instance_id,
+            transform: Transformation {
+                translation,
+                ..Default::default()
+            },
+            data: LayerEntryData::PopRange(PopRangeInstanceObject {
+                pop_type,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Wraps `objects` in the single-chunk LGB layout `Zone` iterates over. A default `LayerHeader`
+    /// reports `has_layer_set(_) == true` (referenced type `All`), matching `Zone::default()`'s
+    /// `layer_set == 0`.
+    fn zone_with_objects(objects: Vec<InstanceObject>) -> Zone {
+        let layer = Layer {
+            header: LayerHeader::default(),
+            objects,
+        };
+        Zone {
+            layer_groups: vec![Lgb {
+                chunks: vec![LayerChunk {
+                    layer_group_id: 0,
+                    name: String::new(),
+                    layers: vec![layer],
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Instanced content with no entrance EObj and no `.entrance` map range (e.g. territory 1359
+    /// "w1en", InstanceContent.LGBEventRange == 0) still carries PC PopRanges: the last-resort
+    /// fallback resolves to the first PC PopRange with its real (non-origin) position, rather than
+    /// warping the player to (0,0,0).
+    #[test]
+    fn find_first_pc_pop_range_returns_the_first_pc_spawn() {
+        // A non-PC pop range first, so the filter has to skip it and pick the PC one behind it.
+        let zone = zone_with_objects(vec![
+            make_pop_range(10, PopType::Content, [1.0, 2.0, 3.0]),
+            make_pop_range(11, PopType::PC, [4.0, 5.0, 6.0]),
+        ]);
+
+        let object = zone
+            .find_first_pc_pop_range()
+            .expect("a PC pop range must be found");
+        assert_eq!(object.instance_id, 11);
+
+        let position = pick_point_in_pop_range(object);
+        assert_ne!(position, Position::default());
+        assert_eq!(position.0, Vec3::new(4.0, 5.0, 6.0));
+    }
+
+    /// A zone with only non-PC pop ranges yields nothing, leaving the existing warn path intact.
+    #[test]
+    fn find_first_pc_pop_range_ignores_non_pc_ranges() {
+        let zone = zone_with_objects(vec![make_pop_range(10, PopType::Npc, [1.0, 2.0, 3.0])]);
+        assert!(zone.find_first_pc_pop_range().is_none());
     }
 
     /// While a demi is active the pet is not carried (INTERIM exclusion): ZoneLoaded falls back to

@@ -427,6 +427,7 @@ impl HandlerType {
             TerritoryIntendedUse::LeapOfFaith => Some(Self::PublicContent),
             TerritoryIntendedUse::MordionGaol => Some(Self::Jail),
             TerritoryIntendedUse::GoldSaucer => Some(Self::GoldSaucer),
+            TerritoryIntendedUse::KeyboundBrawler => Some(Self::InstanceContent),
             TerritoryIntendedUse::OceanFishing => Some(Self::InstanceContent),
             TerritoryIntendedUse::OccultCrescent => Some(Self::PublicContent), // TODO: Also initializes a FATE director but we can't do that currently!
             TerritoryIntendedUse::Blunderville => Some(Self::PublicContent),
