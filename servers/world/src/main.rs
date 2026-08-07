@@ -3693,7 +3693,7 @@ async fn process_packet(
                         // EquipGearset2 carries the same gearset payload as EquipGearset (the client
                         // sends it instead when the gearset has a valid linked portrait), plus the
                         // 52-byte portrait/banner block for that gearset. Equip identically, then
-                        // persist the banner and ack it like a SubmitBannerData submission.
+                        // persist the banner and ack it like a SubmitPortraitData submission.
                         connection
                             .equip_gearset(
                                 *gearset_index,
@@ -4051,7 +4051,7 @@ async fn process_packet(
                             })
                             .await;
                     }
-                    ClientZoneIpcData::SubmitBannerData { banner, .. } => {
+                    ClientZoneIpcData::SubmitPortraitData { banner, .. } => {
                         // Persist the submitted gearset portrait banner and acknowledge the save.
                         connection.player_data.plate.set_banner(banner.clone());
                         {

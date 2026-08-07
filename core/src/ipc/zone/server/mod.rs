@@ -342,7 +342,7 @@ impl Default for PlateDesign {
 /// The display "banner" block attached to a gearset's job portrait.
 ///
 /// This is ClientStructs `BannerData` (0x34 / 52 bytes). It is reused verbatim across several
-/// packets: the client submits it via the `SubmitBannerData` upstream packet when toggling the
+/// packets: the client submits it via the `SubmitPortraitData` upstream packet when toggling the
 /// custom-portrait button or saving the banner editor, it is carried inline by `EquipGearset2`
 /// when switching to a gearset that has a valid linked portrait, and it forms the per-member
 /// `banner` field of `PartyMemberPortrait`.

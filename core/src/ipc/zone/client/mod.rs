@@ -403,7 +403,7 @@ pub enum ClientZoneIpcData {
     /// editor. Body = the 52-byte BannerData block + 4 pad. The server acks with an
     /// `ActorControlSelf` `BannerDataUpdateResult` (result=0). This is the display banner for a
     /// gearset, not the plate itself.
-    SubmitBannerData {
+    SubmitPortraitData {
         banner: PortraitBanner,
         /// Empty on the wire.
         pad: u32,

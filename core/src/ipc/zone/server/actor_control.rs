@@ -1285,7 +1285,7 @@ pub enum ActorControlCategory {
         token: u32,
     },
 
-    /// Acknowledges a banner/portrait submission (client `SubmitBannerData`, or an `EquipGearset2`
+    /// Acknowledges a banner/portrait submission (client `SubmitPortraitData`, or an `EquipGearset2`
     /// carrying a portrait block). Corresponds to the client's
     /// `CharaCard::HandleBannerDataUpdatePacket`. Only param1 (result) is read.
     #[brw(magic = 3101u32)]

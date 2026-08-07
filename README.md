@@ -19,6 +19,9 @@ since the owner cringes at the mere mention of `AI`.
 那我请问人类就能做到绝对正确么？你就这么牛逼能做到100%完美不出错？  
 我都不敢打包票自己写的东西100%准确你怎么好意思狗叫AI生成的信息经常有误导性或不准确的？
 
+# Supported game version / 当前支持的游戏版本
+2026.08.05.0000.0000
+
 # TODOs / 待办列表
 ## 主要功能
 - [x] 基础数值计算 / 等级同步
