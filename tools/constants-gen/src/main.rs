@@ -170,7 +170,13 @@ where
 
 /// Sheets that carry no localized column, so physis only has a `Language::None` EXD for them.
 /// Requesting the config language for one of these fails with `ResolverFailed`.
-const LANGUAGE_NEUTRAL_SHEETS: &[&str] = &["AetherCurrent", "CutsceneWorkIndex", "AetherCurrentCompFlgSet"];
+const LANGUAGE_NEUTRAL_SHEETS: &[&str] = &[
+    "AetherCurrent",
+    "CutsceneWorkIndex",
+    "AetherCurrentCompFlgSet",
+    "SatisfactionNpc",
+    "FishingRecordType",
+];
 
 /// The language to read `sheet` in: `Language::None` for the neutral sheets above, else `lang`.
 fn sheet_language(sheet: &str, lang: Language) -> Language {
@@ -766,6 +772,20 @@ mod tests {
     fn raw_is_identity() {
         assert_eq!(Unit::Raw.stored(0), 0);
         assert_eq!(Unit::Raw.stored(20), 20);
+    }
+
+    #[test]
+    fn language_neutral_sheets_ignore_the_configured_language() {
+        let configured = Language::ChineseSimplified;
+        assert_eq!(
+            sheet_language("SatisfactionNpc", configured),
+            Language::None
+        );
+        assert_eq!(
+            sheet_language("FishingRecordType", configured),
+            Language::None
+        );
+        assert_eq!(sheet_language("Title", configured), configured);
     }
 
     // -- Descriptor table sanity ---------------------------------------------------------------
