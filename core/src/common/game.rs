@@ -1039,11 +1039,11 @@ impl Default for HouseId {
         Self {
             unit: HouseUnit {
                 apartment_division_plot_index: 127,
-                apartment_flag: false,
+                apartment_flag: true,
             },
             unk1: 255,
-            ward_index: 0,
-            room_number: 0,
+            ward_index: 0x3F,
+            room_number: 0x3FF,
             territory_type_id: 0xFFFF,
             world_id: 0xFFFF,
         }
